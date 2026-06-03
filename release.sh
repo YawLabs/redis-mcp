@@ -231,11 +231,17 @@ else
   # reports success, but origin's tag stays at the old SHA -- and the later
   # `gh release create` step then creates a GitHub release linked to that
   # stale commit while npm carries the new one.
+  # Compare the annotated TAG-OBJECT sha on both sides. ls-remote returns the
+  # tag-object sha for the ref; `git rev-parse v${VERSION}` (WITHOUT ^{})
+  # returns the local tag-object sha. Peeling only the local side with ^{}
+  # yields the COMMIT sha, which always mismatches an annotated tag-object and
+  # false-aborts every resume run after the tag is pushed. Same object on both
+  # sides = no drift; a rewound/recreated tag yields a different object.
   ORIGIN_TAG_SHA=$(git ls-remote --tags origin "refs/tags/v${VERSION}" 2>/dev/null | awk '{print $1}')
   if [ -n "$ORIGIN_TAG_SHA" ]; then
-    LOCAL_TAG_SHA=$(git rev-parse "v${VERSION}^{}")
+    LOCAL_TAG_SHA=$(git rev-parse "v${VERSION}")
     if [ "$ORIGIN_TAG_SHA" != "$LOCAL_TAG_SHA" ]; then
-      fail "Tag v${VERSION} exists on origin at $ORIGIN_TAG_SHA but local tag points to $LOCAL_TAG_SHA -- resolve the drift before re-running"
+      fail "Tag v${VERSION} object on origin ($ORIGIN_TAG_SHA) differs from local ($LOCAL_TAG_SHA) -- a rewound/recreated tag; resolve the drift before re-running"
     fi
   fi
 
