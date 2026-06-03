@@ -1,0 +1,62 @@
+{
+  "name": "@yawlabs/redis-mcp",
+  "version": "0.1.0",
+  "mcpName": "io.github.YawLabs/redis-mcp",
+  "description": "Redis MCP server - SCAN-based key exploration, TTL/memory/keyspace introspection, slowlog + INFO health, and a DBA advisor for AI assistants",
+  "license": "MIT",
+  "author": "YawLabs <contact@yaw.sh>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YawLabs/redis-mcp.git"
+  },
+  "keywords": [
+    "redis",
+    "valkey",
+    "cache",
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "agent",
+    "claude",
+    "claude-code",
+    "cursor",
+    "llm",
+    "scan",
+    "slowlog",
+    "keyspace"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "redis-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist/index.js",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc && node build.mjs",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "test": "npm run build && node scripts/run-tests.mjs dist",
+    "test:ci": "npm run test",
+    "test:integration": "npm run build && node scripts/run-tests.mjs dist --integration",
+    "lint": "biome check src/",
+    "lint:fix": "biome check --write src/",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.12",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@types/node": "^25.6.0",
+    "esbuild": "^0.28.0",
+    "ioredis": "^5.11.0",
+    "typescript": "^6.0.3",
+    "zod": "^4.3.6"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
