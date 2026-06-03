@@ -7,6 +7,10 @@
 
 Built and maintained by [Yaw Labs](https://yaw.sh).
 
+[![Add to Yaw MCP](https://yaw.sh/yaw-mcp-button.svg)](https://yaw.sh/mcp/install?name=Redis&command=npx&args=-y%2C%40yawlabs%2Fredis-mcp&description=Explore%20and%20diagnose%20Redis%20-%20SCAN%20key%20exploration%2C%20health%2C%20DBA%20advisor&source=https%3A%2F%2Fgithub.com%2FYawLabs%2Fredis-mcp)
+
+One click adds this to your local Yaw MCP config so it's available in every Yaw Terminal session. Or install manually below.
+
 ## Why this one?
 
 - **`SCAN`, never `KEYS`.** Every key-enumeration path uses cursor-based `SCAN` with a bounded `COUNT` and an iteration cap. `KEYS *` is O(N) over the entire keyspace and blocks Redis's single-threaded event loop for the full scan - a self-inflicted outage on a large instance. `SCAN` yields between batches. See [Security](#security).
