@@ -103,7 +103,6 @@ export const READONLY_COMMANDS: ReadonlySet<string> = new Set([
   "latency",
   "lolwut",
   "acl",
-  "wait",
   "echo",
   "expiretime",
   "pexpiretime",
@@ -212,8 +211,8 @@ export const WRITE_COMMANDS: ReadonlySet<string> = new Set([
 
 export interface ClassifyResult {
   allowed: boolean;
-  /** "read" | "write" | "unknown" -- the classification, present even when allowed=false. */
-  kind: "read" | "write" | "unknown";
+  /** "read" | "write" | "unknown" | "incomplete" -- the classification, present even when allowed=false. */
+  kind: "read" | "write" | "unknown" | "incomplete";
   reason: string;
 }
 
@@ -261,7 +260,7 @@ export function classifyCommand(command: string, writesAllowed: boolean, subcomm
     if (sub === undefined || sub === "") {
       return {
         allowed: false,
-        kind: "unknown",
+        kind: "incomplete",
         reason: `${verb.toUpperCase()} requires a subcommand. Read-only subcommands: ${[...roSubs].join(", ")}.`,
       };
     }

@@ -12,6 +12,12 @@
  *   - REDIS_CONNECT_TIMEOUT_MS         - TCP connect timeout (default: 10000).
  *                                        Without this, a dead host hangs until the
  *                                        OS gives up (~2 minutes on most platforms).
+ *
+ * Timeout note: the FIRST tool call against an unreachable host is bounded by
+ * connectTimeout (REDIS_CONNECT_TIMEOUT_MS), not commandTimeout -- the TCP
+ * connect is deferred (lazyConnect) and runs as part of that first call, and it
+ * may attempt one reconnect via retryStrategy before failing. commandTimeout
+ * (REDIS_COMMAND_TIMEOUT_MS) governs commands on an already-connected client.
  *   - REDIS_MAX_KEYS                   - max keys returned by a single scan tool call
  *                                        (default: 1000). Caps both the response size
  *                                        and the number of SCAN iterations.
@@ -55,18 +61,35 @@ function getRedisUrl(): string {
   return url;
 }
 
+/**
+ * Eagerly validate required configuration at startup. Calls getRedisUrl() purely
+ * for its throw-on-missing behavior so the launcher can surface the missing-URL
+ * error (and the Windows .mcp.json hint) in startup logs, instead of deferring it
+ * to the first tool call. Only env validation runs here; the TCP connect stays
+ * lazy inside getClient().
+ */
+export function validateConfig(): void {
+  getRedisUrl();
+}
+
 export function getCommandTimeoutMs(): number {
   const raw = process.env.REDIS_COMMAND_TIMEOUT_MS;
   if (!raw) return 10_000;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 10_000;
+  // Floor to integer ms. ioredis accepts sub-ms values, but values below
+  // network noise (e.g. 0.5ms) cause spurious command failures on a busy
+  // event loop rather than meaningful timeouts. Timeouts are wall-clock-ish
+  // at ms granularity; sub-ms precision isn't useful to callers.
+  if (!Number.isFinite(parsed) || parsed <= 0) return 10_000;
+  return Math.max(1, Math.floor(parsed));
 }
 
 export function getConnectTimeoutMs(): number {
   const raw = process.env.REDIS_CONNECT_TIMEOUT_MS;
   if (!raw) return 10_000;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 10_000;
+  if (!Number.isFinite(parsed) || parsed <= 0) return 10_000;
+  return Math.max(1, Math.floor(parsed));
 }
 
 export function getMaxKeys(): number {
@@ -133,9 +156,14 @@ export function getClient(): Redis {
     connectTimeout: getConnectTimeoutMs(),
     commandTimeout: getCommandTimeoutMs(),
     maxRetriesPerRequest: 0,
-    // Allow one reconnection attempt on a dropped connection; beyond that,
-    // surface the failure rather than reconnect-looping forever.
-    retryStrategy: (times) => (times > 1 ? null : 200),
+    // Allow up to 3 reconnect attempts on a dropped connection with growing
+    // backoff (200ms, 400ms, 800ms). After that, surface the failure rather
+    // than reconnect-looping forever. The MCP server process is long-lived,
+    // so a few transient blips (a brief TCP RST during a host deploy, a
+    // 200ms wifi drop) should not require a full process restart. Three is
+    // chosen as the budget: enough to absorb a typical deploy blip, low
+    // enough that a genuinely dead host fails within ~1.4s of total wait.
+    retryStrategy: (times) => (times > 3 ? null : 200 * 2 ** (times - 1)),
     ...(tls ? { tls: { rejectUnauthorized: tls.rejectUnauthorized } } : {}),
   });
   // ioredis emits 'error' for connection-level failures. Log to stderr so the
@@ -151,35 +179,18 @@ export function formatRedisError(err: unknown): string {
   if (!(err instanceof Error)) return String(err);
   // ioredis surfaces server-side errors with a `message` like
   // "READONLY You can't write against a read only replica." or
-  // "NOAUTH Authentication required." Pass the message through; it already
-  // carries the Redis error-code prefix an agent can act on.
+  // "NOAUTH Authentication required." The message itself carries the
+  // Redis error-code prefix an agent can act on. We also surface the error
+  // CLASS (err.name) when it differs from the generic "Error" so an agent
+  // can distinguish "Connection is closed" (ConnectionError) from
+  // "WRONGTYPE Operation against a key holding the wrong kind of value"
+  // (ReplyError) without parsing the message. Built-in Error subclasses
+  // like TypeError / RangeError are passed through as-is -- their `name`
+  // is more specific than "Error" and is useful to surface.
+  if (err.name && err.name !== "Error") {
+    return `${err.name}: ${err.message}`;
+  }
   return err.message;
-}
-
-/**
- * Run a single read-only Redis command via the allowlist gate. The command name
- * is checked against the read-only allowlist (commands.ts) with writes
- * disallowed regardless of `ALLOW_WRITES`; this path is for internal tool code
- * that should NEVER mutate (health rollups, the advisor). `subcommand` (the
- * first arg) is forwarded so multi-word commands like `CONFIG GET` classify
- * correctly.
- */
-export async function runReadOnlyCommand<T = unknown>(
-  command: string,
-  args: (string | number)[],
-  subcommand?: string,
-): Promise<ApiResponse<T>> {
-  const decision = classifyCommand(command, /* writesAllowed */ false, subcommand);
-  if (!decision.allowed) {
-    return { ok: false, error: decision.reason };
-  }
-  try {
-    const c = getClient();
-    const result = (await c.call(command, ...args.map(String))) as T;
-    return { ok: true, data: result };
-  } catch (err) {
-    return { ok: false, error: formatRedisError(err) };
-  }
 }
 
 /**

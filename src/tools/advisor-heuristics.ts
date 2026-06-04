@@ -56,8 +56,16 @@ export function findBigKeys(sample: SampledKey[], t: BigKeyThresholds): Finding[
       detail: { key: k.key, type: k.type, memory_bytes: k.memoryBytes, elements: k.elements },
     });
   }
-  // Largest first.
-  findings.sort((a, b) => Number(b.detail?.memory_bytes ?? 0) - Number(a.detail?.memory_bytes ?? 0));
+  // Most dangerous first: critical before warn, then by memory bytes desc, then
+  // element count desc -- so element-only-flagged keys (memory unknown -> 0) are
+  // ranked by severity and size rather than sinking below every byte-flagged key.
+  const sevRank = (s: Severity): number => (s === "critical" ? 0 : s === "warn" ? 1 : 2);
+  findings.sort(
+    (a, b) =>
+      sevRank(a.severity) - sevRank(b.severity) ||
+      Number(b.detail?.memory_bytes ?? 0) - Number(a.detail?.memory_bytes ?? 0) ||
+      Number(b.detail?.elements ?? 0) - Number(a.detail?.elements ?? 0),
+  );
   return findings;
 }
 
@@ -65,7 +73,8 @@ export function findBigKeys(sample: SampledKey[], t: BigKeyThresholds): Finding[
  * Missing-TTL heuristic. Keys without an expiry accumulate forever unless the
  * app deletes them explicitly -- the classic "Redis as a cache slowly fills up
  * and starts evicting / OOMs" failure. We report the share of the SAMPLE that
- * has no TTL; over `missingTtlSampleThreshold` (default 50%) is flagged.
+ * has no TTL; over `missingTtlFractionThreshold` (default 50%) is flagged.
+ * Severity splits on the fraction: >= 0.9 -> warn, otherwise info.
  *
  * Distinct from the eviction-policy check: a `noeviction` policy + many
  * no-TTL keys is the dangerous combination (the instance OOMs instead of
@@ -184,12 +193,17 @@ export function findForkLatencyRisk(
     });
   }
 
+  // rdb_last_bgsave_status is near-always present in INFO (it reports "ok" even
+  // when persistence is effectively off), so including it makes this a
+  // deliberately INCLUSIVE (may over-warn) info-severity signal. We keep it
+  // anyway: a default-config instance doing periodic RDB snapshots may have ONLY
+  // this set, and dropping it would false-negative a real fork risk.
   const persistenceOn = f.aofEnabled || f.rdbBgsaveInProgress || f.rdbLastBgsaveStatus !== null;
   if (f.usedMemoryBytes !== null && f.usedMemoryBytes >= largeDatasetBytes && persistenceOn) {
     findings.push({
       severity: "info",
       message:
-        `Dataset is large (${f.usedMemoryBytes} bytes) and persistence (RDB/AOF) is active. Forks for ` +
+        `Dataset is large (${f.usedMemoryBytes} bytes) and persistence (RDB/AOF) appears active. Forks for ` +
         "snapshots/rewrites scale with dataset size and can stall the main thread. Ensure transparent huge " +
         "pages are disabled and that the host has enough free RAM for copy-on-write during a save.",
       detail: { used_bytes: f.usedMemoryBytes, aof_enabled: f.aofEnabled },

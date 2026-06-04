@@ -63,14 +63,19 @@ export async function closeSeedClient(): Promise<void> {
 /**
  * Delete every key matching `prefix*` via SCAN (never KEYS) so test runs don't
  * leak fixtures into the target instance. Safe to call when the prefix matches
- * nothing.
+ * nothing. DEL is chunked at 500 keys/call so a large leftover fixture can't
+ * trip maxmemory mid-cleanup (one big DEL batch can OOM a constrained test
+ * instance).
  */
 export async function cleanupPrefix(client: Redis, prefix: string): Promise<void> {
   let cursor = "0";
   do {
     const [next, keys] = (await client.scan(cursor, "MATCH", `${prefix}*`, "COUNT", 500)) as [string, string[]];
     cursor = next;
-    if (keys.length > 0) await client.del(...keys);
+    for (let i = 0; i < keys.length; i += 500) {
+      const chunk = keys.slice(i, i + 500);
+      if (chunk.length > 0) await client.del(...chunk);
+    }
   } while (cursor !== "0");
 }
 

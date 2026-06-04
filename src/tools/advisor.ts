@@ -10,14 +10,8 @@ import {
   findMissingTtls,
   type SampledKey,
 } from "./advisor-heuristics.js";
-import { parseInfo } from "./info.js";
-
-function num(info: Record<string, string>, field: string): number | null {
-  const v = info[field];
-  if (v === undefined) return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
+import { infoNum, parseInfo, parseKeyspace } from "./info.js";
+import { accumulateScan, deriveMaxIterations } from "./scan.js";
 
 /**
  * Probe one sampled key for the facts the heuristics need: type, TTL, memory
@@ -118,65 +112,123 @@ export const advisorTools = [
         .max(1)
         .default(0.5)
         .describe("Flag when this fraction of the sample lacks a TTL (default 0.5 = 50%)."),
+      usedPctWarn: z
+        .number()
+        .min(0)
+        .max(1)
+        .default(0.8)
+        .describe("Warn when used/maxmemory reaches this ratio (default 0.8 = 80%)."),
+      forkUsecWarn: z
+        .number()
+        .int()
+        .min(1)
+        .default(100_000)
+        .describe("Warn when the last fork took at least this many microseconds (default 100000 = 100ms)."),
+      largeDatasetBytes: z
+        .number()
+        .int()
+        .min(1)
+        .default(1_073_741_824)
+        .describe("Treat the dataset as large (fork-risk) at or above this many bytes (default 1 GiB = 1073741824)."),
     }),
     handler: async (input: unknown) => {
-      const { sampleSize, bigKeyBytes, bigKeyElements, missingTtlFraction } = input as {
+      const {
+        sampleSize,
+        bigKeyBytes,
+        bigKeyElements,
+        missingTtlFraction,
+        usedPctWarn,
+        forkUsecWarn,
+        largeDatasetBytes,
+      } = input as {
         sampleSize: number;
         bigKeyBytes: number;
         bigKeyElements: number;
         missingTtlFraction: number;
+        usedPctWarn: number;
+        forkUsecWarn: number;
+        largeDatasetBytes: number;
       };
       try {
         const client = getClient();
         const rawInfo = await client.info();
         const info = parseInfo(rawInfo);
 
-        // SCAN-sample up to sampleSize keys (never KEYS). Bounded iterations so
-        // an empty/small keyspace returns promptly.
+        // SCAN-sample up to sampleSize keys (never KEYS). We route through
+        // accumulateScan (shared with redis_scan) so the iteration cap, the
+        // "cursor=0" stop, and the within-call dedup all use the same well-
+        // tested loop -- and so the response can surface a `truncated` flag
+        // when the iteration cap trips (a large selective keyspace is the
+        // common cause). NOTE: this draws from the first cursor pages, so
+        // the sample is SCAN-order-biased, not a uniform-random draw.
         const sample: SampledKey[] = [];
+        let probeFailures = 0;
+        let scanTruncated = false;
+        let scanIterations = 0;
+        let scanMaxIterations = 0;
         if (sampleSize > 0) {
           const scanCount = getScanCount();
-          let cursor = "0";
-          let iterations = 0;
-          const sampledKeys: string[] = [];
-          do {
-            const [next, keys] = (await client.scan(cursor, "COUNT", scanCount)) as [string, string[]];
-            cursor = next;
-            iterations++;
-            for (const k of keys) {
-              if (sampledKeys.length >= sampleSize) break;
-              sampledKeys.push(k);
-            }
-          } while (cursor !== "0" && sampledKeys.length < sampleSize && iterations < sampleSize + 50);
+          const maxIterations = deriveMaxIterations(sampleSize, scanCount);
+          scanMaxIterations = maxIterations;
+          const scanned = await accumulateScan(
+            "0",
+            async (cur) => {
+              const [next, keys] = (await client.scan(cur, "COUNT", scanCount)) as [string, string[]];
+              return { cursor: next, keys };
+            },
+            { maxKeys: sampleSize, maxIterations },
+          );
+          scanTruncated = scanned.truncated;
+          scanIterations = scanned.iterations;
 
-          for (const k of sampledKeys) {
-            sample.push(await probeKey(client, k));
+          // Probe keys with bounded concurrency (~20 in flight) instead of one
+          // serial round-trip at a time -- each probeKey is ~2 RTTs, so serial
+          // probing of a 5000-key sample is ~10k serial RTTs. Order is
+          // irrelevant: findBigKeys sorts, and missing-ttl is a fraction.
+          //
+          // Probe failures (the type/ttl/memory pipeline returned an error
+          // for a key) are counted rather than sinking the whole sample.
+          // Without this counter, a keyspace where MEMORY USAGE is ACL-
+          // blocked (or any probe is failing wholesale) yields a sample of
+          // all `type: 'none'`, and findMissingTtls escalates to "warn" on
+          // 100% no-TTL -- a misleading false positive.
+          const probeChunkSize = 20;
+          for (let i = 0; i < scanned.keys.length; i += probeChunkSize) {
+            const chunk = scanned.keys.slice(i, i + probeChunkSize);
+            const probed = await Promise.all(chunk.map((k) => probeKey(client, k)));
+            for (const p of probed) {
+              sample.push(p);
+              // A "failed" probe is one where the type was forced to "none"
+              // AND the TTL defaulted to -2 (key missing / probe error) --
+              // type: 'none' alone is a legitimate empty result, not an error.
+              if (p.type === "none" && p.ttl === -2) probeFailures++;
+            }
           }
         }
 
-        const hasKeysWithoutTtl = sample.some((k) => k.ttl === -1);
+        const hasKeysWithoutTtl =
+          sample.some((k) => k.ttl === -1) || parseKeyspace(info).some((db) => db.keys_without_ttl > 0);
 
         const bigKeys = findBigKeys(sample, { bigKeyBytes, bigKeyElements });
         const missingTtls = findMissingTtls(sample, missingTtlFraction);
 
         const evictionFacts: EvictionFacts = {
-          maxmemoryBytes: num(info, "maxmemory"),
-          usedMemoryBytes: num(info, "used_memory"),
+          maxmemoryBytes: infoNum(info, "maxmemory"),
+          usedMemoryBytes: infoNum(info, "used_memory"),
           maxmemoryPolicy: info.maxmemory_policy ?? null,
-          evictedKeys: num(info, "evicted_keys"),
+          evictedKeys: infoNum(info, "evicted_keys"),
           hasKeysWithoutTtl,
         };
-        const evictionPressure = findEvictionPressure(evictionFacts, 0.8);
+        const evictionPressure = findEvictionPressure(evictionFacts, usedPctWarn);
 
         const forkFacts: ForkLatencyFacts = {
-          latestForkUsec: num(info, "latest_fork_usec"),
-          usedMemoryBytes: num(info, "used_memory"),
+          latestForkUsec: infoNum(info, "latest_fork_usec"),
+          usedMemoryBytes: infoNum(info, "used_memory"),
           aofEnabled: info.aof_enabled === "1",
           rdbBgsaveInProgress: info.rdb_bgsave_in_progress === "1",
           rdbLastBgsaveStatus: info.rdb_last_bgsave_status ?? null,
         };
-        // 100ms fork warn threshold; 1 GiB "large dataset" threshold.
-        const forkLatencyRisk = findForkLatencyRisk(forkFacts, 100_000, 1_073_741_824);
+        const forkLatencyRisk = findForkLatencyRisk(forkFacts, forkUsecWarn, largeDatasetBytes);
 
         const allFindings: Finding[] = [...bigKeys, ...missingTtls, ...evictionPressure, ...forkLatencyRisk];
         const counts = {
@@ -189,6 +241,10 @@ export const advisorTools = [
           ok: true,
           data: {
             sampled_keys: sample.length,
+            probe_failures: probeFailures,
+            scan_truncated: scanTruncated,
+            scan_iterations: scanIterations,
+            scan_max_iterations: scanMaxIterations,
             summary: counts,
             big_keys: bigKeys,
             missing_ttls: missingTtls,

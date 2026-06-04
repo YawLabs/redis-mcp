@@ -2,7 +2,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { isWritesAllowed, shutdown } from "./api.js";
+import { isWritesAllowed, shutdown, validateConfig } from "./api.js";
 import { advisorTools } from "./tools/advisor.js";
 import { healthTools } from "./tools/health.js";
 import { keyspaceTools } from "./tools/keyspace.js";
@@ -69,6 +69,18 @@ for (const tool of allTools) {
       }
     },
   );
+}
+
+// Validate required config eagerly so a missing REDIS_URL (and the Windows
+// .mcp.json hint) surfaces in startup logs and exits, instead of deferring the
+// error to the first tool call. Only env validation runs here; the TCP connect
+// stays lazy inside getClient().
+try {
+  validateConfig();
+} catch (err) {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`@yawlabs/redis-mcp: ${message}`);
+  process.exit(1);
 }
 
 const transport = new StdioServerTransport();

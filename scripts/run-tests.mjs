@@ -43,4 +43,20 @@ if (files.length === 0) {
 const nodeArgs = ["--test", "--test-concurrency=1", ...files];
 
 const child = spawn(process.execPath, nodeArgs, { stdio: "inherit" });
-child.on("exit", (code) => process.exit(code ?? 1));
+child.on("exit", (code) => {
+  // On a plain unit run, the *.integration.test.js suites either aren't in
+  // `files` (filtered out) or load and SKIP when REDIS_URL is unset -- and
+  // node:test reports "# skipped 0" for a file that self-skips, so the inert
+  // integration tier is otherwise invisible. Print an explicit note so the
+  // gap is obvious.
+  if (!integrationOnly) {
+    const integrationCount = allFiles.filter((f) => f.includes(".integration.")).length;
+    if (integrationCount > 0) {
+      console.log(
+        `Note: ${integrationCount} integration test file(s) require REDIS_URL + ` +
+          "`npm run test:integration` to execute (skipped here).",
+      );
+    }
+  }
+  process.exit(code ?? 1);
+});

@@ -37,7 +37,11 @@ export const scanTools = [
         .min(1)
         .max(10_000)
         .optional()
-        .describe("COUNT hint per SCAN iteration (default REDIS_SCAN_COUNT=100). Higher = fewer round-trips."),
+        .describe(
+          "COUNT hint per SCAN iteration (default REDIS_SCAN_COUNT=100). Higher = fewer round-trips, " +
+            "but very high values increase per-iteration event-loop hold time on large keyspaces -- the " +
+            "small-batch yield is this module's core safety property for production instances.",
+        ),
     }),
     handler: async (input: unknown) => {
       const { match, cursor, type, count } = input as {
@@ -61,6 +65,12 @@ export const scanTools = [
             if (match) args.push("MATCH", match);
             args.push("COUNT", scanCount);
             if (type) args.push("TYPE", type);
+            // The `as [string]` cast intentionally bypasses ioredis's typed scan
+            // overloads (which can't express this conditionally-built variadic);
+            // a future arg-order mistake here would NOT be caught by tsc, so keep
+            // the MATCH/COUNT/TYPE order above correct. SCAN ... TYPE requires
+            // Redis >= 6.0; against an older server ioredis forwards the token
+            // and Redis returns an error, surfaced cleanly via the catch below.
             const [nextCursor, keys] = (await client.scan(...(args as [string]))) as [string, string[]];
             return { cursor: nextCursor, keys };
           },
@@ -75,8 +85,14 @@ export const scanTools = [
             cursor: result.cursor,
             truncated: result.truncated,
             iterations: result.iterations,
+            maxIterations,
             ...(result.truncated
-              ? { _note: "More keys remain. Pass the returned `cursor` back to continue the scan." }
+              ? {
+                  _note:
+                    result.iterations >= maxIterations
+                      ? "SCAN iteration cap hit before maxKeys was reached (a selective `match` can yield few keys per round-trip). Resume from the returned `cursor`, or raise `count` to scan more keys per round-trip."
+                      : "More keys remain. Pass the returned `cursor` back to continue the scan.",
+                }
               : {}),
           },
         };

@@ -22,6 +22,23 @@ describe("Tool definitions", () => {
     assert.ok(allTools.length > 0);
   });
 
+  it("should expose exactly the expected set of tool names", () => {
+    // Asserting the exact name set (not just shape) so a dropped or renamed
+    // tool fails loudly instead of passing silently. Update this list
+    // deliberately when a tool is intentionally added/removed.
+    const expected = [
+      "redis_advisor",
+      "redis_command",
+      "redis_get",
+      "redis_health",
+      "redis_key_info",
+      "redis_scan",
+      "redis_slowlog",
+    ];
+    const actual = allTools.map((t) => t.name).sort();
+    assert.deepEqual(actual, expected);
+  });
+
   for (const tool of allTools) {
     describe(tool.name, () => {
       it("should have a name prefixed with redis_", () => {

@@ -72,6 +72,13 @@ describe("integration: keyspace tools (live Redis)", { skip: skipReason() }, () 
       await seed.xadd(k("stream"), "*", "field", "a");
       await seed.xadd(k("stream"), "*", "field", "b");
       await seed.xadd(k("stream"), "*", "field", "c");
+
+      // A larger stream so a small `limit` returns fewer entries than XLEN --
+      // exercises the corrected `truncated: total > entryCount` (the returned
+      // payload size), not the old `total > cap`.
+      for (let i = 0; i < 10; i++) {
+        await seed.xadd(k("stream_big"), "*", "n", String(i));
+      }
     }
   });
 
@@ -95,12 +102,22 @@ describe("integration: keyspace tools (live Redis)", { skip: skipReason() }, () 
     assert.equal(r.data.value, "hello world");
   });
 
-  it("hash -> { type:'hash', fields object, field_count }", async () => {
+  it("hash -> { type:'hash', fields object, field_count is HLEN total, truncated:false under limit }", async () => {
     const r = (await redis_get.handler({ key: k("hash") })) as R;
     assert.equal(r.ok, true, r.error);
     assert.equal(r.data.type, "hash");
     assert.deepEqual(r.data.fields, { f1: "v1", f2: "v2", f3: "v3" });
-    assert.equal(r.data.field_count, 3);
+    assert.equal(r.data.field_count, 3, "field_count is the full HLEN");
+    assert.equal(r.data.truncated, false, "3 total !> 3 returned");
+  });
+
+  it("hash -> HSCAN-bounded read: truncated + fields capped at `limit` (HLEN total stays full)", async () => {
+    const r = (await redis_get.handler({ key: k("hash"), limit: 1 })) as R;
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.data.type, "hash");
+    assert.equal(r.data.field_count, 3, "field_count is the full HLEN, not the window");
+    assert.equal(Object.keys(r.data.fields).length, 1, "HSCAN loop stops once count >= cap");
+    assert.equal(r.data.truncated, true, "3 total > 1 returned");
   });
 
   it("list -> ordered values, length, truncated:false when under limit", async () => {
@@ -183,6 +200,26 @@ describe("integration: keyspace tools (live Redis)", { skip: skipReason() }, () 
     const rLimited = (await redis_get.handler({ key: k("stream"), limit: 1 })) as R;
     assert.equal(rLimited.data.entries.length, 1);
     assert.equal(rLimited.data.truncated, true, "3 total > cap 1");
+  });
+
+  it("stream -> truncated measures the returned payload (total > entryCount), not the cap", async (t) => {
+    if (!streams) {
+      t.skip("server has no Streams (XADD) -- pre-5.0 build");
+      return;
+    }
+    // 10 seeded entries, limit 4 -> XREVRANGE COUNT 4 returns 4 entries.
+    const r = (await redis_get.handler({ key: k("stream_big"), limit: 4 })) as R;
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.data.type, "stream");
+    assert.equal(r.data.length, 10, "length is the full XLEN");
+    assert.ok(Array.isArray(r.data.entries));
+    assert.equal(r.data.entries.length, 4, "XREVRANGE COUNT honors the limit");
+    assert.equal(r.data.truncated, true, "10 total > 4 returned entries");
+
+    // Under no limit (cap defaults to REDIS_MAX_KEYS >= 10) all 10 come back -> not truncated.
+    const rAll = (await redis_get.handler({ key: k("stream_big") })) as R;
+    assert.equal(rAll.data.entries.length, 10);
+    assert.equal(rAll.data.truncated, false, "10 total !> 10 returned entries");
   });
 
   it("missing key -> { exists:false }", async () => {

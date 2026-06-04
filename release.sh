@@ -8,6 +8,10 @@
 #
 # If interrupted, re-run with the same version - each step is idempotent.
 #
+# On MINGW64-ARM64 (where npm-run-script segfaults on exit-cleanup), prefix with
+# SKIP_LINT=1 to no-op the local lint runs; CI/standard runners are the
+# authoritative lint gate.
+#
 # Prerequisites:
 #   - Node.js 20+ and npm installed
 #   - npm authenticated (npm whoami) or NODE_AUTH_TOKEN set
@@ -153,6 +157,14 @@ fi
 # =============================================================================
 step 1 "Lint"
 
+# Run lint:fix FIRST (not just lint) per the pre-commit checklist:
+# biome-formatting diffs break CI releases, and `lint` only reports -- it
+# doesn't reformat. Doing the fix here means a working-tree file reformat
+# from the bump commit at step 4 isn't a surprise on the next workstation
+# pull. lint:fix is a no-op when the tree is already formatted.
+if [ "$IS_CI" != "true" ]; then
+  npm run lint:fix >/dev/null 2>&1 || true
+fi
 npm run lint || fail "Lint failed"
 info "Lint passed"
 

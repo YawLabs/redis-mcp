@@ -11,7 +11,10 @@ import {
 } from "./api.js";
 
 describe("isWritesAllowed", () => {
-  const original = process.env.ALLOW_WRITES;
+  let original: string | undefined;
+  beforeEach(() => {
+    original = process.env.ALLOW_WRITES;
+  });
   afterEach(() => {
     if (original === undefined) delete process.env.ALLOW_WRITES;
     else process.env.ALLOW_WRITES = original;
@@ -38,7 +41,10 @@ describe("isWritesAllowed", () => {
 });
 
 describe("getMaxKeys", () => {
-  const original = process.env.REDIS_MAX_KEYS;
+  let original: string | undefined;
+  beforeEach(() => {
+    original = process.env.REDIS_MAX_KEYS;
+  });
   afterEach(() => {
     if (original === undefined) delete process.env.REDIS_MAX_KEYS;
     else process.env.REDIS_MAX_KEYS = original;
@@ -65,7 +71,10 @@ describe("getMaxKeys", () => {
 });
 
 describe("getScanCount", () => {
-  const original = process.env.REDIS_SCAN_COUNT;
+  let original: string | undefined;
+  beforeEach(() => {
+    original = process.env.REDIS_SCAN_COUNT;
+  });
   afterEach(() => {
     if (original === undefined) delete process.env.REDIS_SCAN_COUNT;
     else process.env.REDIS_SCAN_COUNT = original;
@@ -87,8 +96,12 @@ describe("getScanCount", () => {
 });
 
 describe("getCommandTimeoutMs / getConnectTimeoutMs", () => {
-  const origCmd = process.env.REDIS_COMMAND_TIMEOUT_MS;
-  const origConn = process.env.REDIS_CONNECT_TIMEOUT_MS;
+  let origCmd: string | undefined;
+  let origConn: string | undefined;
+  beforeEach(() => {
+    origCmd = process.env.REDIS_COMMAND_TIMEOUT_MS;
+    origConn = process.env.REDIS_CONNECT_TIMEOUT_MS;
+  });
   afterEach(() => {
     if (origCmd === undefined) delete process.env.REDIS_COMMAND_TIMEOUT_MS;
     else process.env.REDIS_COMMAND_TIMEOUT_MS = origCmd;
@@ -103,11 +116,14 @@ describe("getCommandTimeoutMs / getConnectTimeoutMs", () => {
     assert.equal(getConnectTimeoutMs(), 10_000);
   });
 
-  it("accept positive numbers and preserve fractional (timeouts can be sub-ms)", () => {
+  it("accept positive numbers and floor to integer ms (sub-ms is below network noise)", () => {
     process.env.REDIS_COMMAND_TIMEOUT_MS = "2500.5";
-    assert.equal(getCommandTimeoutMs(), 2500.5);
+    assert.equal(getCommandTimeoutMs(), 2500, "fractional floors to integer ms");
     process.env.REDIS_CONNECT_TIMEOUT_MS = "3000";
     assert.equal(getConnectTimeoutMs(), 3000);
+    // Sub-ms values floor to 1 rather than 0/negative, which would disable the timeout.
+    process.env.REDIS_COMMAND_TIMEOUT_MS = "0.5";
+    assert.equal(getCommandTimeoutMs(), 1, "sub-ms floors to 1, not 0");
   });
 
   it("fall back to 10000 on invalid", () => {
@@ -119,11 +135,12 @@ describe("getCommandTimeoutMs / getConnectTimeoutMs", () => {
 });
 
 describe("getTlsConfig", () => {
-  const original = process.env.REDIS_TLS_REJECT_UNAUTHORIZED;
+  let original: string | undefined;
   const originalErr = console.error;
   let stderrCalls: string[] = [];
 
   beforeEach(() => {
+    original = process.env.REDIS_TLS_REJECT_UNAUTHORIZED;
     stderrCalls = [];
     console.error = (msg?: unknown) => {
       stderrCalls.push(String(msg));
@@ -164,11 +181,30 @@ describe("getTlsConfig", () => {
 });
 
 describe("formatRedisError", () => {
-  it("passes through an Error message (carries the Redis error-code prefix)", () => {
+  it("passes through a plain Error message (carries the Redis error-code prefix)", () => {
+    // Generic `Error` instances have `name === "Error"`; we don't prefix
+    // those (would be noisy) -- the message already has the Redis prefix.
     assert.equal(
       formatRedisError(new Error("READONLY You can't write against a read only replica.")),
       "READONLY You can't write against a read only replica.",
     );
+  });
+
+  it("prefixes a non-generic err.name so agents can distinguish error classes", () => {
+    // ioredis errors: ReplyError (server reply, e.g. WRONGTYPE), ConnectionError
+    // (socket dropped), MaxRetriesPerRequestError (retry budget exhausted).
+    // The class name in the prefix lets an agent triage without parsing the
+    // message.
+    const replyErr = new Error("WRONGTYPE Operation against a key holding the wrong kind of value");
+    replyErr.name = "ReplyError";
+    assert.equal(
+      formatRedisError(replyErr),
+      "ReplyError: WRONGTYPE Operation against a key holding the wrong kind of value",
+    );
+
+    const connErr = new Error("Connection is closed.");
+    connErr.name = "ConnectionError";
+    assert.equal(formatRedisError(connErr), "ConnectionError: Connection is closed.");
   });
 
   it("stringifies non-Error values", () => {

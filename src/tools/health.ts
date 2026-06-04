@@ -1,14 +1,6 @@
 import { z } from "zod";
 import { formatRedisError, getClient } from "../api.js";
-import { parseInfo, parseKeyspace, parseSlowlog, type SlowlogEntry } from "./info.js";
-
-/** Fields we surface from INFO, coerced from the flat string map. */
-function num(info: Record<string, string>, field: string): number | null {
-  const v = info[field];
-  if (v === undefined) return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
+import { infoNum, parseInfo, parseKeyspace, parseSlowlog, type SlowlogEntry } from "./info.js";
 
 export const healthTools = [
   {
@@ -56,7 +48,11 @@ export const healthTools = [
 
         const warnings: string[] = [];
         const dbsizeTuple = replies[1];
-        const dbsize = dbsizeTuple && !dbsizeTuple[0] ? Number(dbsizeTuple[1]) : null;
+        let dbsize: number | null = null;
+        if (dbsizeTuple && !dbsizeTuple[0]) {
+          const n = Number(dbsizeTuple[1]);
+          dbsize = Number.isFinite(n) ? n : null;
+        }
         if (dbsizeTuple?.[0]) warnings.push(`dbsize fetch failed: ${formatRedisError(dbsizeTuple[0])}`);
 
         let slowlog: SlowlogEntry[] = [];
@@ -69,15 +65,15 @@ export const healthTools = [
           }
         }
 
-        const hits = num(info, "keyspace_hits");
-        const misses = num(info, "keyspace_misses");
+        const hits = infoNum(info, "keyspace_hits");
+        const misses = infoNum(info, "keyspace_misses");
         const hitRate =
           hits !== null && misses !== null && hits + misses > 0
             ? Number(((hits / (hits + misses)) * 100).toFixed(2))
             : null;
 
-        const maxmemory = num(info, "maxmemory");
-        const usedMemory = num(info, "used_memory");
+        const maxmemory = infoNum(info, "maxmemory");
+        const usedMemory = infoNum(info, "used_memory");
         const memoryPctOfMax =
           maxmemory !== null && maxmemory > 0 && usedMemory !== null
             ? Number(((usedMemory / maxmemory) * 100).toFixed(2))
@@ -91,34 +87,34 @@ export const healthTools = [
               version: info.redis_version ?? null,
               mode: info.redis_mode ?? null,
               role: info.role ?? null,
-              uptime_seconds: num(info, "uptime_in_seconds"),
+              uptime_seconds: infoNum(info, "uptime_in_seconds"),
             },
             memory: {
               used_bytes: usedMemory,
               used_human: info.used_memory_human ?? null,
-              peak_bytes: num(info, "used_memory_peak"),
+              peak_bytes: infoNum(info, "used_memory_peak"),
               maxmemory_bytes: maxmemory,
               maxmemory_human: info.maxmemory_human ?? null,
               maxmemory_policy: info.maxmemory_policy ?? null,
               pct_of_maxmemory: memoryPctOfMax,
-              mem_fragmentation_ratio: num(info, "mem_fragmentation_ratio"),
-              evicted_keys: num(info, "evicted_keys"),
+              mem_fragmentation_ratio: infoNum(info, "mem_fragmentation_ratio"),
+              evicted_keys: infoNum(info, "evicted_keys"),
             },
             clients: {
-              connected: num(info, "connected_clients"),
-              blocked: num(info, "blocked_clients"),
-              maxclients: num(info, "maxclients"),
+              connected: infoNum(info, "connected_clients"),
+              blocked: infoNum(info, "blocked_clients"),
+              maxclients: infoNum(info, "maxclients"),
             },
             throughput: {
-              instantaneous_ops_per_sec: num(info, "instantaneous_ops_per_sec"),
-              total_commands_processed: num(info, "total_commands_processed"),
+              instantaneous_ops_per_sec: infoNum(info, "instantaneous_ops_per_sec"),
+              total_commands_processed: infoNum(info, "total_commands_processed"),
               keyspace_hits: hits,
               keyspace_misses: misses,
               hit_rate_pct: hitRate,
             },
             persistence: {
-              rdb_last_save_time: num(info, "rdb_last_save_time"),
-              rdb_changes_since_last_save: num(info, "rdb_changes_since_last_save"),
+              rdb_last_save_time: infoNum(info, "rdb_last_save_time"),
+              rdb_changes_since_last_save: infoNum(info, "rdb_changes_since_last_save"),
               rdb_last_bgsave_status: info.rdb_last_bgsave_status ?? null,
               aof_enabled: info.aof_enabled === "1",
               aof_last_write_status: info.aof_last_write_status ?? null,

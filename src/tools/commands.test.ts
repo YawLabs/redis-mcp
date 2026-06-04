@@ -92,9 +92,11 @@ describe("classifyCommand: subcommand-sensitive multi-word commands", () => {
     assert.equal(classifyCommand("ACL", false, "SETUSER").allowed, false);
   });
 
-  it("a multi-word command with no subcommand is rejected for ambiguity", () => {
+  it("a multi-word command with no subcommand is rejected as incomplete", () => {
     const r = classifyCommand("CONFIG", false);
     assert.equal(r.allowed, false);
+    // The verb is known; only the subcommand is missing -- classify as "incomplete".
+    assert.equal(r.kind, "incomplete");
     assert.match(r.reason, /requires a subcommand/i);
     // Lists the read-only subcommands so the caller can recover.
     assert.match(r.reason, /get/i);
@@ -137,6 +139,13 @@ describe("classifyCommand: fail-closed on unknown / dangerous commands", () => {
 
   it("rejects a made-up command", () => {
     const r = classifyCommand("TOTALLYNOTACOMMAND", true);
+    assert.equal(r.allowed, false);
+    assert.equal(r.kind, "unknown");
+    assert.match(r.reason, /not on the allowlist/i);
+  });
+
+  it("WAIT is no longer read-only: blocked as unknown even with writes on", () => {
+    const r = classifyCommand("WAIT", true);
     assert.equal(r.allowed, false);
     assert.equal(r.kind, "unknown");
     assert.match(r.reason, /not on the allowlist/i);

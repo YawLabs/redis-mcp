@@ -2,6 +2,23 @@ import { z } from "zod";
 import { formatRedisError, getClient, getMaxKeys, runCommand } from "../api.js";
 import { keySchema } from "./params.js";
 
+/**
+ * Pull the value out of an ioredis pipeline reply at index `i`, tolerating both
+ * a short/missing reply array and a per-probe error. ioredis pipeline.exec()
+ * resolves to `[Error | null, unknown][] | null` -- each command yields an
+ * `[err, value]` tuple so one probe failing (e.g. MEMORY USAGE on a server that
+ * lacks it) doesn't sink the others. Returns null when the tuple is absent or
+ * its error slot is non-null; otherwise the value cast to T.
+ */
+export function pickReply<T>(replies: [Error | null, unknown][] | null, i: number): T | null {
+  if (!replies) return null;
+  const tuple = replies[i];
+  if (!tuple) return null;
+  const [err, value] = tuple;
+  if (err) return null;
+  return value as T;
+}
+
 export const keyspaceTools = [
   {
     name: "redis_key_info",
@@ -35,21 +52,13 @@ export const keyspaceTools = [
         pipeline.call("OBJECT", "ENCODING", key);
         pipeline.call("MEMORY", "USAGE", key);
         pipeline.call("OBJECT", "IDLETIME", key);
-        const replies = (await pipeline.exec()) ?? [];
+        const replies = await pipeline.exec();
 
-        const val = <T>(i: number): T | null => {
-          const tuple = replies[i];
-          if (!tuple) return null;
-          const [err, value] = tuple;
-          if (err) return null;
-          return value as T;
-        };
-
-        const type = val<string>(0) ?? "none";
+        const type = pickReply<string>(replies, 0) ?? "none";
         if (type === "none") {
           return { ok: true, data: { key, exists: false } };
         }
-        const ttlSeconds = val<number>(1);
+        const ttlSeconds = pickReply<number>(replies, 1);
         return {
           ok: true,
           data: {
@@ -57,11 +66,11 @@ export const keyspaceTools = [
             exists: true,
             type,
             ttl_seconds: ttlSeconds,
-            ttl_ms: val<number>(2),
+            ttl_ms: pickReply<number>(replies, 2),
             has_expiry: ttlSeconds !== null && ttlSeconds >= 0,
-            encoding: val<string>(3),
-            memory_usage_bytes: val<number>(4),
-            idle_time_seconds: val<number>(5),
+            encoding: pickReply<string>(replies, 3),
+            memory_usage_bytes: pickReply<number>(replies, 4),
+            idle_time_seconds: pickReply<number>(replies, 5),
           },
         };
       } catch (err) {
@@ -112,8 +121,22 @@ export const keyspaceTools = [
             return { ok: true, data: { key, type, value } };
           }
           case "hash": {
-            const obj = await client.hgetall(key);
-            return { ok: true, data: { key, type, fields: obj, field_count: Object.keys(obj).length } };
+            const total = await client.hlen(key);
+            // HSCAN-bounded read so a million-field hash doesn't materialize fully.
+            const fields: Record<string, string> = {};
+            let count = 0;
+            let cur = "0";
+            do {
+              const [next, batch] = await client.hscan(key, cur, "COUNT", 200);
+              cur = next;
+              // batch is a flat [field, value, field, value, ...] array.
+              for (let i = 0; i + 1 < batch.length; i += 2) {
+                if (count >= cap) break;
+                fields[batch[i] as string] = batch[i + 1] as string;
+                count++;
+              }
+            } while (cur !== "0" && count < cap);
+            return { ok: true, data: { key, type, field_count: total, fields, truncated: total > count } };
           }
           case "list": {
             const total = await client.llen(key);
@@ -152,7 +175,8 @@ export const keyspaceTools = [
             const total = await client.xlen(key);
             // XREVRANGE returns newest first; cap with COUNT.
             const entries = (await client.call("XREVRANGE", key, "+", "-", "COUNT", String(cap))) as unknown;
-            return { ok: true, data: { key, type, length: total, entries, truncated: total > cap } };
+            const entryCount = Array.isArray(entries) ? entries.length : 0;
+            return { ok: true, data: { key, type, length: total, entries, truncated: total > entryCount } };
           }
           default:
             return { ok: false, error: `Unsupported key type: ${type}` };
@@ -183,7 +207,12 @@ export const keyspaceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      command: z.string().min(1).max(64).describe("The Redis command verb (e.g. `GET`, `HGETALL`, `INFO`)."),
+      command: z
+        .string()
+        .min(1)
+        .max(64)
+        .regex(/^[A-Za-z]+$/, "Command must be a single alphabetic verb (e.g. GET, HGETALL); pass subcommands as args.")
+        .describe("The Redis command verb (e.g. `GET`, `HGETALL`, `INFO`)."),
       args: z
         .array(z.union([z.string(), z.number()]))
         .default([])

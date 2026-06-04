@@ -79,6 +79,19 @@ function numOr(v: string | undefined, fallback: number): number {
 }
 
 /**
+ * Coerce a single INFO field to a number, returning null when the field is
+ * missing or its value is not a finite number. Shared by the health and
+ * advisor tools so they surface `number | null` (never NaN) for every numeric
+ * INFO field.
+ */
+export function infoNum(info: Record<string, string>, field: string): number | null {
+  const v = info[field];
+  if (v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
  * The raw SLOWLOG GET reply is an array of entries, each:
  *   [id, timestamp_unix, micros, [arg, arg, ...], client_addr?, client_name?]
  * (the last two fields exist on Redis 4.0+). Normalize into a readable object.

@@ -32,6 +32,7 @@
   },
   "files": [
     "dist/index.js",
+    "dist/index.js.map",
     "LICENSE",
     "README.md",
     "CHANGELOG.md"
