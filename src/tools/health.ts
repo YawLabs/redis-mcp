@@ -24,7 +24,7 @@ export const healthTools = [
         .number()
         .int()
         .min(0)
-        .max(100)
+        .max(128)
         .default(5)
         .describe("Number of recent slow commands to include (default 5, 0 to skip)."),
     }),

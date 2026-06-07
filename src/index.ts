@@ -3,6 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { isWritesAllowed, shutdown, validateConfig } from "./api.js";
+import { toMcpResponse } from "./mcp-response.js";
 import { advisorTools } from "./tools/advisor.js";
 import { healthTools } from "./tools/health.js";
 import { keyspaceTools } from "./tools/keyspace.js";
@@ -42,30 +43,10 @@ for (const tool of allTools) {
     async (input: Record<string, unknown>) => {
       try {
         const result = await (tool.handler as (input: unknown) => Promise<unknown>)(input);
-        const response = result as { ok: boolean; data?: unknown; error?: string };
-
-        if (!response.ok) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Error: ${response.error || "Unknown error"}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        const text = JSON.stringify(response.data ?? { success: true }, null, 2);
-        return {
-          content: [{ type: "text" as const, text }],
-        };
+        return toMcpResponse(result);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        return {
-          content: [{ type: "text" as const, text: `Error: ${message}` }],
-          isError: true,
-        };
+        return toMcpResponse({ ok: false, error: message });
       }
     },
   );

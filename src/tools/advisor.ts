@@ -186,12 +186,14 @@ export const advisorTools = [
           // probing of a 5000-key sample is ~10k serial RTTs. Order is
           // irrelevant: findBigKeys sorts, and missing-ttl is a fraction.
           //
-          // Probe failures (the type/ttl/memory pipeline returned an error
-          // for a key) are counted rather than sinking the whole sample.
-          // Without this counter, a keyspace where MEMORY USAGE is ACL-
-          // blocked (or any probe is failing wholesale) yields a sample of
-          // all `type: 'none'`, and findMissingTtls escalates to "warn" on
-          // 100% no-TTL -- a misleading false positive.
+          // Probe failures (the type/ttl/memory pipeline errored, or the key
+          // vanished between SCAN and probe) are counted and surfaced as
+          // `probe_failures` so the caller knows the sample is partially blind
+          // rather than silently trusting findings drawn from a degraded probe.
+          // A failed probe is type:'none' + ttl:-2; it does NOT inflate the
+          // missing-ttl fraction (findMissingTtls counts only ttl === -1, a
+          // real key with no expiry), so this counter is transparency, not a
+          // heuristic guard.
           const probeChunkSize = 20;
           for (let i = 0; i < scanned.keys.length; i += probeChunkSize) {
             const chunk = scanned.keys.slice(i, i + probeChunkSize);

@@ -5,6 +5,7 @@ import {
   getCommandTimeoutMs,
   getConnectTimeoutMs,
   getMaxKeys,
+  getMaxValueBytes,
   getScanCount,
   getTlsConfig,
   isWritesAllowed,
@@ -68,6 +69,11 @@ describe("getMaxKeys", () => {
       assert.equal(getMaxKeys(), 1000, `REDIS_MAX_KEYS=${JSON.stringify(v)} should default`);
     }
   });
+
+  it("clamps absurdly large values to 1_000_000", () => {
+    process.env.REDIS_MAX_KEYS = "100000000";
+    assert.equal(getMaxKeys(), 1_000_000);
+  });
 });
 
 describe("getScanCount", () => {
@@ -92,6 +98,43 @@ describe("getScanCount", () => {
     assert.equal(getScanCount(), 10);
     process.env.REDIS_SCAN_COUNT = "0";
     assert.equal(getScanCount(), 100);
+  });
+
+  it("clamps absurdly large values to 1_000_000", () => {
+    process.env.REDIS_SCAN_COUNT = "50000000";
+    assert.equal(getScanCount(), 1_000_000);
+  });
+});
+
+describe("getMaxValueBytes", () => {
+  let original: string | undefined;
+  beforeEach(() => {
+    original = process.env.REDIS_MAX_VALUE_BYTES;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.REDIS_MAX_VALUE_BYTES;
+    else process.env.REDIS_MAX_VALUE_BYTES = original;
+  });
+
+  it("defaults to 256 KiB (262144)", () => {
+    delete process.env.REDIS_MAX_VALUE_BYTES;
+    assert.equal(getMaxValueBytes(), 262_144);
+  });
+
+  it("accepts positive integers, floors fractional, defaults on invalid", () => {
+    process.env.REDIS_MAX_VALUE_BYTES = "1024";
+    assert.equal(getMaxValueBytes(), 1024);
+    process.env.REDIS_MAX_VALUE_BYTES = "1024.9";
+    assert.equal(getMaxValueBytes(), 1024);
+    for (const v of ["abc", "-5", "0", ""]) {
+      process.env.REDIS_MAX_VALUE_BYTES = v;
+      assert.equal(getMaxValueBytes(), 262_144, `REDIS_MAX_VALUE_BYTES=${JSON.stringify(v)} should default`);
+    }
+  });
+
+  it("clamps absurdly large values to the 64 MB ceiling", () => {
+    process.env.REDIS_MAX_VALUE_BYTES = "999999999999";
+    assert.equal(getMaxValueBytes(), 64_000_000);
   });
 });
 

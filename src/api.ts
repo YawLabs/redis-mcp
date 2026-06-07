@@ -25,6 +25,10 @@
  *                                        A larger value scans more keys per round-trip
  *                                        but holds the Redis event loop slightly longer
  *                                        each iteration.
+ *   - REDIS_MAX_VALUE_BYTES            - max bytes of a string value redis_get returns
+ *                                        before windowing it with GETRANGE (default:
+ *                                        262144 = 256 KiB). Keeps a multi-MB string from
+ *                                        flooding the model context; sets `truncated`.
  *   - REDIS_TLS_REJECT_UNAUTHORIZED    - "false" to disable TLS cert verification (for
  *                                        managed Redis using private-CA certs). The
  *                                        connection is still encrypted.
@@ -96,14 +100,40 @@ export function getMaxKeys(): number {
   const raw = process.env.REDIS_MAX_KEYS;
   if (!raw) return 1000;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 1000;
+  // Upper-clamp at 1_000_000: a fat-fingered REDIS_MAX_KEYS (e.g. 1e8) would
+  // otherwise let a single scan tool call accumulate that many keys into memory
+  // and the JSON reply. Lower bound stays > 0 (else default). Mirrors the
+  // per-call schema caps (count <= 10000, sampleSize <= 5000), which were
+  // already bounded -- only the env-derived ceilings were open-ended.
+  if (!(Number.isFinite(parsed) && parsed > 0)) return 1000;
+  return Math.min(1_000_000, Math.floor(parsed));
 }
 
 export function getScanCount(): number {
   const raw = process.env.REDIS_SCAN_COUNT;
   if (!raw) return 100;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 100;
+  // Upper-clamp at 1_000_000 (an absolute sanity ceiling, far above any sane
+  // COUNT hint): a pathological value would hold the single-threaded Redis
+  // event loop for a long time per round-trip. Lower bound stays > 0.
+  if (!(Number.isFinite(parsed) && parsed > 0)) return 100;
+  return Math.min(1_000_000, Math.floor(parsed));
+}
+
+/**
+ * Max bytes of a string value `redis_get` will return before windowing it with
+ * GETRANGE. A bare GET on a multi-megabyte string would dump the whole value
+ * into the model context -- the exact failure `redis_key_info` warns about.
+ * Default 256 KiB: large enough to return ordinary cache values whole, small
+ * enough that a giant blob is truncated (with `truncated: true` + the full
+ * `length`). Env-tunable via REDIS_MAX_VALUE_BYTES; clamped to a 64 MB ceiling.
+ */
+export function getMaxValueBytes(): number {
+  const raw = process.env.REDIS_MAX_VALUE_BYTES;
+  if (!raw) return 262_144;
+  const parsed = Number(raw);
+  if (!(Number.isFinite(parsed) && parsed > 0)) return 262_144;
+  return Math.min(64_000_000, Math.floor(parsed));
 }
 
 export function isWritesAllowed(): boolean {

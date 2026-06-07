@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyCommand, READONLY_COMMANDS, WRITE_COMMANDS } from "./commands.js";
+import { classifyCommand, READONLY_COMMANDS, READONLY_SUBCOMMANDS, WRITE_COMMANDS } from "./commands.js";
 
 describe("classifyCommand: read-only commands", () => {
   it("allows core reads regardless of ALLOW_WRITES", () => {
@@ -165,6 +165,20 @@ describe("allowlist hygiene", () => {
   it("all allowlist entries are lowercase (classifier lowercases input)", () => {
     for (const c of [...READONLY_COMMANDS, ...WRITE_COMMANDS]) {
       assert.equal(c, c.toLowerCase(), `${c} should be lowercase in the allowlist`);
+    }
+  });
+
+  it("subcommand-gated verbs are NOT in the bare read-only allowlist (no fail-open fallback)", () => {
+    // classifyCommand consults READONLY_SUBCOMMANDS first, so a verb in BOTH
+    // sets would be dead code -- and removing it from the subcommand map later
+    // would silently let ALL its subcommands (incl. writes) through as a bare
+    // read via READONLY_COMMANDS. Keep the two sets disjoint.
+    for (const verb of READONLY_SUBCOMMANDS.keys()) {
+      assert.equal(
+        READONLY_COMMANDS.has(verb),
+        false,
+        `${verb} must be gated SOLELY by READONLY_SUBCOMMANDS, not also listed in READONLY_COMMANDS`,
+      );
     }
   });
 });

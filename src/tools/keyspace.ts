@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { formatRedisError, getClient, getMaxKeys, runCommand } from "../api.js";
+import { formatRedisError, getClient, getMaxKeys, getMaxValueBytes, runCommand } from "../api.js";
 import { keySchema } from "./params.js";
 
 /**
@@ -83,7 +83,8 @@ export const keyspaceTools = [
     name: "redis_get",
     description:
       "Read a key's value, dispatching by type so you get the right shape without knowing the " +
-      "type in advance: string -> the string; hash -> field/value object; list -> array (LRANGE " +
+      "type in advance: string -> the value (byte-windowed at REDIS_MAX_VALUE_BYTES, default 256 KiB, with " +
+      "`truncated` + full `length` when capped); hash -> field/value object; list -> array (LRANGE " +
       "windowed by `limit`); set -> member array; zset -> [member, score] pairs (ZRANGE " +
       "WITHSCORES, windowed); stream -> recent entries (XREVRANGE, windowed). Collection reads " +
       "are capped at `limit` (default REDIS_MAX_KEYS) so a million-element list can't blow out " +
@@ -117,8 +118,14 @@ export const keyspaceTools = [
 
         switch (type) {
           case "string": {
-            const value = await client.get(key);
-            return { ok: true, data: { key, type, value } };
+            // Window the value so a multi-megabyte string can't blow out the
+            // model context (the risk redis_key_info warns about). STRLEN is
+            // O(1); GETRANGE 0..(cap-1) returns the whole value when it fits and
+            // the first `cap` bytes otherwise. A truncated tail may split a
+            // multi-byte UTF-8 char at the boundary -- acceptable for a preview.
+            const maxBytes = getMaxValueBytes();
+            const [byteLength, value] = await Promise.all([client.strlen(key), client.getrange(key, 0, maxBytes - 1)]);
+            return { ok: true, data: { key, type, value, length: byteLength, truncated: byteLength > maxBytes } };
           }
           case "hash": {
             const total = await client.hlen(key);
@@ -211,7 +218,10 @@ export const keyspaceTools = [
         .string()
         .min(1)
         .max(64)
-        .regex(/^[A-Za-z]+$/, "Command must be a single alphabetic verb (e.g. GET, HGETALL); pass subcommands as args.")
+        .regex(
+          /^[A-Za-z_]+$/,
+          "Command must be a single verb (letters and underscore, e.g. GET, HGETALL, SORT_RO); pass subcommands as args.",
+        )
         .describe("The Redis command verb (e.g. `GET`, `HGETALL`, `INFO`)."),
       args: z
         .array(z.union([z.string(), z.number()]))

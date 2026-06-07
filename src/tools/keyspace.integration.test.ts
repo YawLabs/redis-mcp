@@ -50,6 +50,10 @@ describe("integration: keyspace tools (live Redis)", { skip: skipReason() }, () 
     // One key of each type.
     await seed.set(k("str"), "hello world");
 
+    // A string larger than the default value window (REDIS_MAX_VALUE_BYTES =
+    // 262144) so redis_get must GETRANGE-window it and report truncated.
+    await seed.set(k("bigstr"), "x".repeat(300_000));
+
     // Field-by-field HSET: variadic/object-form HSET is Redis 4+; doing it one
     // pair at a time keeps the seed working on older servers too (the handler
     // under test only ever READS via HGETALL, so seeding shape is incidental).
@@ -95,11 +99,22 @@ describe("integration: keyspace tools (live Redis)", { skip: skipReason() }, () 
 
   // ---- redis_get: type dispatch ----
 
-  it("string -> { type:'string', value }", async () => {
+  it("string -> { type:'string', value, length, truncated:false } under the window", async () => {
     const r = (await redis_get.handler({ key: k("str") })) as R;
     assert.equal(r.ok, true, r.error);
     assert.equal(r.data.type, "string");
     assert.equal(r.data.value, "hello world");
+    assert.equal(r.data.length, 11, "length is the full STRLEN");
+    assert.equal(r.data.truncated, false, "11 bytes !> the value window");
+  });
+
+  it("string -> windows a value larger than REDIS_MAX_VALUE_BYTES (truncated, full length reported)", async () => {
+    const r = (await redis_get.handler({ key: k("bigstr") })) as R;
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.data.type, "string");
+    assert.equal(r.data.length, 300_000, "length is the full STRLEN");
+    assert.equal(r.data.value.length, 262_144, "value windowed to REDIS_MAX_VALUE_BYTES (default 256 KiB)");
+    assert.equal(r.data.truncated, true, "300000 > 262144");
   });
 
   it("hash -> { type:'hash', fields object, field_count is HLEN total, truncated:false under limit }", async () => {

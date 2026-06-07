@@ -13,10 +13,16 @@
 /**
  * Read-only Redis commands the server will always run, regardless of
  * ALLOW_WRITES. Deliberately conservative: introspection, single-key reads,
- * range/probe reads, and the diagnostic surface (INFO, SLOWLOG GET, MEMORY
- * USAGE, CLIENT LIST). Multi-word commands are keyed on the first token; the
- * subcommand is checked separately for the few where a subcommand can mutate
- * (see READONLY_SUBCOMMANDS).
+ * range/probe reads, and the diagnostic surface.
+ *
+ * NOTE: subcommand-gated verbs (CONFIG, CLIENT, MEMORY, SLOWLOG, ACL, LATENCY,
+ * COMMAND, OBJECT, XINFO) are deliberately NOT listed here -- they are gated
+ * SOLELY by READONLY_SUBCOMMANDS so that only their read-only subcommands pass
+ * (CONFIG GET ok, CONFIG SET gated). Listing a verb in BOTH sets would be dead
+ * code AND a fail-open footgun: classifyCommand consults READONLY_SUBCOMMANDS
+ * first, so a future edit dropping a verb from that map would silently let ALL
+ * its subcommands (including writes) through as a bare read via this set. A
+ * hygiene test (commands.test.ts) asserts the two sets stay disjoint.
  *
  * NOTE: `KEYS` is deliberately ABSENT. Key enumeration goes through SCAN only
  * (see scan.ts) -- KEYS is O(N) and blocks the single-threaded event loop.
@@ -33,7 +39,6 @@ export const READONLY_COMMANDS: ReadonlySet<string> = new Set([
   "exists",
   "dbsize",
   "randomkey",
-  "object",
   "dump",
   "touch", // updates only LRU/LFU access time, not the value -- treated read-ish
   // string reads
@@ -88,24 +93,32 @@ export const READONLY_COMMANDS: ReadonlySet<string> = new Set([
   "xrange",
   "xrevrange",
   "xlen",
-  "xinfo",
   "xpending",
-  // diagnostics / health
+  // diagnostics / health (subcommand-gated verbs like MEMORY/SLOWLOG/CLIENT/
+  // CONFIG/ACL/LATENCY/COMMAND live in READONLY_SUBCOMMANDS, NOT here)
   "info",
   "ping",
   "time",
   "lastsave",
-  "memory",
-  "slowlog",
-  "client",
-  "command",
-  "config",
-  "latency",
   "lolwut",
-  "acl",
   "echo",
   "expiretime",
   "pexpiretime",
+  // probabilistic / geo / misc reads. The mutating siblings (PFADD, PFMERGE,
+  // GEOADD, GEOSEARCHSTORE, GEORADIUS ... STORE, SORT ... STORE, BITFIELD with
+  // SET/INCRBY) are intentionally absent; only the pure-read verbs (and the
+  // explicit *_RO variants) are listed.
+  "pfcount",
+  "geosearch",
+  "geopos",
+  "geodist",
+  "geohash",
+  "georadius_ro",
+  "georadiusbymember_ro",
+  "sintercard",
+  "lcs",
+  "sort_ro",
+  "bitfield_ro",
 ]);
 
 /**
