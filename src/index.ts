@@ -65,7 +65,12 @@ try {
 }
 
 const transport = new StdioServerTransport();
-await server.connect(transport);
+// No top-level await: the CJS single-binary build (esbuild SEA) cannot emit
+// top-level await. .catch keeps the connect's failure handling behavior.
+server.connect(transport).catch((err: unknown) => {
+  process.stderr.write(`redis-mcp: ${err instanceof Error ? err.message : String(err)}\n`);
+  process.exit(1);
+});
 
 // Startup banner on stderr - stdio MCP protocol uses stdout, so stderr is free for logs.
 const writesNote = isWritesAllowed() ? "writes ENABLED" : "read-only";

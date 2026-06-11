@@ -17,3 +17,8 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Single-binary build artifacts (SEA)
+bin/
+build-tmp/
+dist-release/
