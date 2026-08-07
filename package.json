@@ -28,9 +28,10 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "redis-mcp": "dist/index.js"
+    "redis-mcp": "bin/redis-mcp.mjs"
   },
   "files": [
+    "bin/redis-mcp.mjs",
     "dist/index.js",
     "dist/index.js.map",
     "LICENSE",
