@@ -1,6 +1,6 @@
 {
   "name": "@yawlabs/redis-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "mcpName": "io.github.YawLabs/redis-mcp",
   "description": "Redis MCP server - SCAN-based key exploration, TTL/memory/keyspace introspection, slowlog + INFO health, and a DBA advisor for AI assistants",
   "license": "MIT",
