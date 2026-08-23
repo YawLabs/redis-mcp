@@ -23,3 +23,7 @@ bin/*
 !bin/redis-mcp.mjs
 build-tmp/
 dist-release/
+
+# npm auth token -- never commit (a project-local .npmrc can be
+# created by tooling and would carry a live automation token)
+.npmrc
