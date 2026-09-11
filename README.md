@@ -2,6 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@yawlabs/redis-mcp)](https://www.npmjs.com/package/@yawlabs/redis-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Follow @TokenLimitNews on X](https://img.shields.io/badge/follow-%40TokenLimitNews-000000?logo=x&logoColor=white)](https://x.com/TokenLimitNews)
 
 **Explore and diagnose a Redis instance from Claude Code, Cursor, and any MCP client.** Read-only by default - writes opt in via a single env var - and key enumeration always uses `SCAN`, never the O(N) `KEYS`, so it is safe to point at a production instance with millions of keys.
 
