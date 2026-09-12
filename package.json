@@ -2,7 +2,7 @@
   "name": "@yawlabs/redis-mcp",
   "version": "0.3.1",
   "mcpName": "io.github.YawLabs/redis-mcp",
-  "description": "Redis MCP server - SCAN-based key exploration, TTL/memory/keyspace introspection, slowlog + INFO health, and a DBA advisor for AI assistants",
+  "description": "Redis and Valkey MCP server, read-only by default: SCAN key exploration, TTL/memory inspection, slowlog, health, and a DBA advisor.",
   "license": "MIT",
   "author": "YawLabs <contact@yaw.sh>",
   "repository": {
@@ -13,7 +13,9 @@
     "redis",
     "valkey",
     "cache",
+    "database",
     "mcp",
+    "mcp-server",
     "model-context-protocol",
     "ai",
     "agent",
@@ -23,7 +25,9 @@
     "llm",
     "scan",
     "slowlog",
-    "keyspace"
+    "keyspace",
+    "dba",
+    "health-check"
   ],
   "type": "module",
   "main": "dist/index.js",
@@ -61,5 +65,6 @@
   },
   "engines": {
     "node": ">=20"
-  }
+  },
+  "homepage": "https://yaw.sh/mcp-servers/redis-mcp/"
 }
