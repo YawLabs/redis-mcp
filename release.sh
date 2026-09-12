@@ -8,9 +8,9 @@
 #
 # If interrupted, re-run with the same version - each step is idempotent.
 #
-# On MINGW64-ARM64 (where npm-run-script segfaults on exit-cleanup), prefix with
-# SKIP_LINT=1 to no-op the local lint runs; CI/standard runners are the
-# authoritative lint gate.
+# SKIP_LINT=1 no-ops the local lint runs. It is a last resort, not a routine
+# MINGW64-ARM64 workaround -- see the SKIP_LINT block below. This repo has no
+# CI, so skipping lint means publishing unlinted.
 #
 # Prerequisites:
 #   - Node.js 20+ and npm installed
@@ -38,9 +38,33 @@ warn() { echo -e "${YELLOW}  [!] $1${NC}"; }
 fail() { echo -e "${RED}  [X] $1${NC}"; exit 1; }
 
 # SKIP_LINT=1 escape hatch -- wraps `npm`/`pnpm` so lint-related runs are
-# no-ops. Workaround for the MINGW64-ARM64 npm-run-script wrapper that
-# segfaults on exit-cleanup (platform-windows.md). Apply only when the
-# lint runner is broken on the host; CI catches lint regressions anyway.
+# no-ops.
+#
+# THIS SHOULD NOW BE UNNECESSARY, and reaching for it is a signal something
+# regressed. `npm run lint` routes through scripts/lint.mjs, which runs biome
+# from a binary that works on this host: on Windows ARM64 it provisions the x64
+# build of the SAME version package-lock.json installs and runs that under
+# emulation. Verified 2026-09-11 on that host -- `npm run lint` exits 0 through
+# the wrapper, checking src/ with x64 biome 2.4.16, the locked version.
+#
+# The earlier text here blamed "the MINGW64-ARM64 npm-run-script wrapper" and
+# justified skipping with "CI catches lint regressions anyway". Both were wrong.
+# `npm run` is fine on that host (a plain node script through the same wrapper
+# exits 0); the SIGSEGV comes from the arm64 biome executable itself
+# (`@biomejs/cli-win32-arm64/biome.exe`), reproduced in @yawlabs/aws-mcp by
+# invoking that binary directly with no npm in the picture. Nor is it a
+# permanent arm64 defect: measured on this host, arm64 biome 2.5.4 exits 139,
+# while 2.4.16 (the version this repo installs) and 2.5.13 check a tree and
+# report normally. The wrapper routes around the arm64 build regardless of
+# version so that a later bump landing on a bad one cannot turn this gate into
+# a crash mid-release.
+#
+# And this repo has NO CI: there is no .github directory at all and GitHub
+# Actions is disabled on the repo, so nothing downstream re-checks formatting
+# -- skipping the lint step means the release is published unlinted, full stop.
+#
+# So: only set SKIP_LINT=1 if scripts/lint.mjs cannot produce a result at all,
+# and treat that as a bug to fix rather than a step to routinely skip.
 if [ "${SKIP_LINT:-}" = "1" ]; then
   npm() {
     if [ "$1" = "run" ] && [[ "$2" == lint* ]]; then
