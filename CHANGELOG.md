@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.5] — 2026-09-13
 
 ### Fixed
 - **Serving in-process on oam no longer reports a failure.** The built `dist/index.js` carried a top-level `await` — a dead branch of the version lookup, `true ? "0.3.4" : (await null).createRequire(...)`, that esbuild kept — and oam cannot `import()` a module with top-level await. So when the launcher fell back to serving in-process on an oam 0.15.2 host (`REDIS_MCP_SANDBOX=1` under `auto`, with no fresh oam to spawn), it printed `redis-mcp: fallback to Node failed (oam: dynamic import(...) of a module with top-level await is not supported yet)` and set exit code 1, even though the server went on to serve. The version lookup now uses a static import, and a test parses the built bundle and fails on any top-level `await`.
