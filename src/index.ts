@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { isWritesAllowed, shutdown, validateConfig } from "./api.js";
@@ -10,11 +11,18 @@ import { keyspaceTools } from "./tools/keyspace.js";
 import { scanTools } from "./tools/scan-tools.js";
 
 // Injected at build time by esbuild; falls back to reading package.json for tsc builds.
+//
+// A static import, NOT `(await import("node:module"))`: esbuild folds the
+// `typeof` check to `true` but keeps the dead branch, so a dynamic import there
+// left a top-level `await` in dist/index.js. oam cannot `import()` a module
+// with top-level await, so the launcher's in-process path on an oam host
+// reported "fallback to Node failed" and set exit code 1 while the server was
+// serving. bundle.test.ts asserts the bundle has none.
 declare const __VERSION__: string | undefined;
 const version =
   typeof __VERSION__ !== "undefined"
     ? __VERSION__
-    : ((await import("node:module")).createRequire(import.meta.url)("../package.json") as { version: string }).version;
+    : (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 
 // ─── CLI subcommands (run instead of MCP server) ───
 
