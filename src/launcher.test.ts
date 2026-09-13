@@ -192,8 +192,20 @@ type LauncherRun = { stdout: string; stderr: string; code: number | null };
  *
  * Env is a whitelist so a REDIS_MCP_* or REDIS_URL var exported by the
  * developer's shell cannot change what is being asserted.
+ *
+ * `handshake` starts the server for real instead of passing `--version`: it
+ * sends one MCP initialize, and closes stdin once the answer arrives, which the
+ * server reads as the client going away and exits 0 on. `--version` exits on
+ * its own almost at once, so it cannot show a launcher that kills a running
+ * server a few milliseconds in; a handshake can. It needs REDIS_URL set, and
+ * the connect is lazy, so nothing is dialled.
  */
-function runLauncher(hostOam: string | undefined, extraEnv: Record<string, string> = {}): Promise<LauncherRun> {
+function runLauncher(
+  hostOam: string | undefined,
+  extraEnv: Record<string, string> = {},
+  extraPreload = "",
+  handshake = false,
+): Promise<LauncherRun> {
   // Every run also reports, at exit, what the LAUNCHER process's argv[1] ended
   // up as. runInProcess points it at dist/index.js; a handoff leaves it on the
   // launcher. That is the only way to tell "served in-process" from "handed
@@ -203,17 +215,34 @@ function runLauncher(hostOam: string | undefined, extraEnv: Record<string, strin
     hostOam === undefined
       ? ""
       : `Object.defineProperty(process.versions, "oam", { value: ${JSON.stringify(hostOam)}, enumerable: true });`;
-  const preload = ["--import", `data:text/javascript,${encodeURIComponent(`${exitMarker}${posing}`)}`];
+  const preload = ["--import", `data:text/javascript,${encodeURIComponent(`${exitMarker}${posing}${extraPreload}`)}`];
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [...preload, LAUNCHER, "--version"], {
-      env: { PATH: process.env.PATH ?? "", OAM_BIN: process.execPath, ...extraEnv },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const env = { PATH: process.env.PATH ?? "", OAM_BIN: process.execPath, ...extraEnv };
+    const child = handshake
+      ? spawn(process.execPath, [...preload, LAUNCHER], { env, stdio: ["pipe", "pipe", "pipe"] })
+      : spawn(process.execPath, [...preload, LAUNCHER, "--version"], { env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    if (handshake && child.stdin) {
+      // A launcher that exits early closes the pipe under a pending write.
+      child.stdin.on("error", () => {});
+      child.stdin.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "launcher-test", version: "0" },
+          },
+        })}\n`,
+      );
+    }
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       stdout += chunk;
+      if (handshake && /"id":1\b/.test(stdout)) child.stdin?.end();
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
@@ -347,5 +376,60 @@ describe("launcher with no usable oam", () => {
     assert.equal(run.code, 1, JSON.stringify(run));
     assert.equal(run.stdout.trim(), "", "nothing may be served unsandboxed");
     assert.match(run.stderr, /REDIS_MCP_RUNTIME=oam but no usable oam \(0\.15\.2 or newer\) was found/);
+  });
+
+  /**
+   * A preload that makes the launcher's FIRST spawn target a path that does not
+   * exist; later spawns (the Node fallback) are untouched. It stands in for a
+   * chosen oam that passed its --version probe and then could not be spawned --
+   * deleted or replaced in between.
+   */
+  const failFirstSpawn = [
+    'import childProcess from "node:child_process";',
+    'import { syncBuiltinESMExports } from "node:module";',
+    "const realSpawn = childProcess.spawn;",
+    "let failed = false;",
+    "childProcess.spawn = function (cmd, args, opts) {",
+    "  if (failed) return realSpawn.call(this, cmd, args, opts);",
+    "  failed = true;",
+    '  return realSpawn.call(this, cmd + ".does-not-exist", args, opts);',
+    "};",
+    "syncBuiltinESMExports();",
+  ].join("\n");
+
+  it("still falls back when the chosen oam fails to spawn on an oam host", { skip, timeout }, async () => {
+    // A failed spawn emits 'error' and then 'close' with the negative errno, and
+    // on an oam host the launcher pipes stdio and waits for 'close' -- so an
+    // unguarded close handler exited the launcher mid-fallback and nothing
+    // served.
+    const run = await runLauncher("0.9.0", isolated({ OAM_BIN: process.execPath }), failFirstSpawn);
+    assert.equal(run.code, 0, JSON.stringify(run));
+    assert.equal(run.stdout.trim(), PACKAGE_VERSION, "the Node fallback must still serve");
+    assert.match(run.stderr, /failed to launch oam at .*using Node instead/);
+    assert.match(run.stderr, /LAUNCHER_ARGV1=.*redis-mcp\.mjs/);
+  });
+
+  it("still serves in-process when the sandboxed oam fails to spawn on a supported oam host", {
+    skip,
+    timeout,
+  }, async () => {
+    // The same failure on this launcher's other oam-host fallback: a supported
+    // host that took the discovery path for REDIS_MCP_SANDBOX=1 falls back into
+    // its own process, and the same close handler cut that short. A handshake,
+    // not --version: the server's --version exits before that close event
+    // fires, so it passed with the bug present.
+    const run = await runLauncher(
+      "0.15.2",
+      isolated({ OAM_BIN: process.execPath, REDIS_MCP_SANDBOX: "1", REDIS_URL: "redis://127.0.0.1:1" }),
+      failFirstSpawn,
+      true,
+    );
+    assert.equal(run.code, 0, JSON.stringify(run));
+    assert.match(run.stdout, /"id":1\b.*"result"|"result".*"id":1\b/, "the in-process server must answer initialize");
+    assert.match(run.stderr, /LAUNCHER_ARGV1=.*dist[\\/]index\.js/);
+    assert.match(
+      run.stderr,
+      /failed to launch oam at .*; serving in-process on this oam 0\.15\.2, without --permission\.$/m,
+    );
   });
 });
