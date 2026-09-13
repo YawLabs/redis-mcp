@@ -22,6 +22,33 @@
  * For an MCP host config, point straight at oam and skip this file:
  *   { "command": "oam", "args": ["run", "<abs>/dist/index.js"] }
  *
+ * ALREADY RUNNING ON OAM
+ * A host can resolve this package's `bin` and launch `oam run <this file>`
+ * instead of `node <this file>` -- Yaw MCP does, and so does oam's sidecar
+ * regression matrix. This launcher used to discover oam and spawn it anyway,
+ * so one server cost two runtime boots: measured on Windows, oam.exe with a
+ * NESTED oam.exe + conhost.exe underneath it. Now, when `process.versions.oam`
+ * clears the same MINIMUM OAM VERSION a discovered binary has to, the server is
+ * imported into THIS process exactly as the Node fallback is -- no discovery,
+ * no `oam --version` probe, no second oam. OAM_BIN is a discovery input, so it
+ * is not consulted on that path: the host has already chosen which oam runs.
+ *
+ * Two cases skip that shortcut and take the discovery path, deliberately.
+ * REDIS_MCP_SANDBOX=1, because `--permission` is a process-level flag that only
+ * a FRESH oam can apply -- serving in-process there would drop the sandbox, and
+ * the REDIS_URL-pinned net grant with it, without a word: a security downgrade
+ * dressed up as an optimisation. And a host oam below the floor, which takes
+ * the discovery path exactly as it always did.
+ *
+ * The discovery path is not a guaranteed spawn. When it finds no usable oam --
+ * none at all, one below the floor, or one that fails to launch --
+ * REDIS_MCP_RUNTIME=auto falls back to running the server in-process, exactly
+ * as it does on Node, and that fallback carries NO --permission: the sandbox is
+ * not applied, silently when no oam was found or it failed to launch.
+ * REDIS_MCP_RUNTIME=oam turns every one of those into a hard exit instead, so
+ * set it alongside REDIS_MCP_SANDBOX=1 when an unsandboxed server is not
+ * acceptable.
+ *
  * THE `--permission` SANDBOX (oam 0.9.0+, opt-in)
  * `REDIS_MCP_SANDBOX=1` runs the server under oam's permission model.
  *
@@ -46,6 +73,7 @@
  *
  * SELECTION
  *   REDIS_MCP_RUNTIME=oam    require oam; fail loudly if it is missing
+ *                            (already running on oam satisfies it)
  *   REDIS_MCP_RUNTIME=node   never use oam
  *   REDIS_MCP_RUNTIME=auto   prefer oam, silently fall back (default)
  *   REDIS_MCP_SANDBOX=1      run oam under --permission (oam 0.9.0+)
@@ -113,17 +141,27 @@ function findOam() {
 }
 
 /**
- * `oam --version` -> [major, minor, patch], or null when it cannot be read.
+ * Version text -> [major, minor, patch], or null when it holds no version.
  * A pre-release suffix (0.9.0-rc.1) truncates to its base version.
+ *
+ * Shared by the two places a version is read -- a discovered binary's
+ * `oam --version` output ("oam 0.15.1") and the host's own
+ * `process.versions.oam` ("0.15.1") -- so they cannot disagree about what a
+ * version string means, or which floor it has to clear.
  */
+function parseVersion(text) {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(text);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/** `oam --version` -> [major, minor, patch], or null when it cannot be read. */
 function oamVersion(cmd) {
   try {
     const out = execFileSync(cmd, ["--version"], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
     });
-    const m = /(\d+)\.(\d+)\.(\d+)/.exec(out);
-    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+    return parseVersion(out);
   } catch {
     // Not executable, wrong arch, or deleted since the stat. Caller degrades.
     return null;
@@ -138,6 +176,29 @@ function atLeast(v, min) {
     if (v[i] < min[i]) return false;
   }
   return true;
+}
+
+/**
+ * Where the server runs, decided BEFORE any discovery:
+ *   "in-process"  import it into THIS process
+ *   "discover"    find an oam binary, gate its version, spawn it -- or, under
+ *                 `auto`, fall back to in-process (and so unsandboxed) when
+ *                 that fails
+ *
+ * `hostOam` is `process.versions.oam`: oam's own key, absent on Node, so on
+ * Node every mode but `node` is the discovery path it always was. `sandbox`
+ * is whether a spawn would carry flags only a fresh oam can apply; see ALREADY
+ * RUNNING ON OAM above for why that alone forces the spawn. The floor is
+ * OAM_MIN itself, not a parameter, so a host oam and a discovered one can never
+ * be held to different minimums.
+ *
+ * Pure on purpose: every input is passed in, so the whole decision is testable
+ * without booting a runtime.
+ */
+function runtimePlan({ mode, hostOam, sandbox }) {
+  if (mode === "node") return "in-process";
+  if (sandbox) return "discover";
+  return atLeast(parseVersion(hostOam ?? ""), OAM_MIN) ? "in-process" : "discover";
 }
 
 /**
@@ -238,7 +299,12 @@ async function runInProcess() {
 
 const mode = (process.env.REDIS_MCP_RUNTIME ?? "auto").toLowerCase();
 
-if (mode === "node") {
+// The sandbox is read off the grant list rather than REDIS_MCP_SANDBOX, so
+// "would the spawn carry --permission" cannot drift from what the spawn below
+// actually passes.
+const plan = runtimePlan({ mode, hostOam: process.versions.oam, sandbox: sandboxFlags().length > 0 });
+
+if (plan === "in-process") {
   await runInProcess();
 } else {
   const oam = findOam();
