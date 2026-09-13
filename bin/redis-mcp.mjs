@@ -50,7 +50,9 @@
  * acceptable.
  *
  * THE `--permission` SANDBOX (oam 0.9.0+, opt-in)
- * `REDIS_MCP_SANDBOX=1` runs the server under oam's permission model.
+ * `REDIS_MCP_SANDBOX=1` runs a spawned oam under its permission model. It
+ * cannot sandbox a server that ends up in-process -- see the discovery-path
+ * fallback under ALREADY RUNNING ON OAM.
  *
  * The net grant is DERIVED from REDIS_URL at launch, for the same reason as
  * postgres-mcp: the one endpoint it may reach is the one it was pointed at, with
@@ -73,10 +75,12 @@
  *
  * SELECTION
  *   REDIS_MCP_RUNTIME=oam    require oam; fail loudly if it is missing
- *                            (already running on oam satisfies it)
+ *                            (already running on oam 0.9.0+ satisfies it,
+ *                            except under REDIS_MCP_SANDBOX=1)
  *   REDIS_MCP_RUNTIME=node   never use oam
  *   REDIS_MCP_RUNTIME=auto   prefer oam, silently fall back (default)
- *   REDIS_MCP_SANDBOX=1      run oam under --permission (oam 0.9.0+)
+ *   REDIS_MCP_SANDBOX=1      run a spawned oam under --permission (oam 0.9.0+);
+ *                            NOT applied when auto falls back in-process
  *   OAM_BIN=/path/to/oam     explicit binary, checked before any discovery
  */
 
@@ -188,7 +192,8 @@ function atLeast(v, min) {
  * `hostOam` is `process.versions.oam`: oam's own key, absent on Node, so on
  * Node every mode but `node` is the discovery path it always was. `sandbox`
  * is whether a spawn would carry flags only a fresh oam can apply; see ALREADY
- * RUNNING ON OAM above for why that alone forces the spawn. The floor is
+ * RUNNING ON OAM above for why that alone forces the discovery path -- which
+ * still spawns nothing when it finds no usable oam. The floor is
  * OAM_MIN itself, not a parameter, so a host oam and a discovered one can never
  * be held to different minimums.
  *
