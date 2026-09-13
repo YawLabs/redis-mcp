@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.4] — 2026-09-13
 
 ### Fixed
 - **The launcher always uses the newest oam, and the minimum is now the latest release, 0.15.2.** It used to take the *first* oam binary it found and only then check its version, so a stale copy in an earlier location hid a current one: with oam 0.9.0 in `~/.oam/bin` and 0.15.2 on `PATH`, it ran 0.9.0. Every oam binary it can see is now asked for its version, and the newest at or above 0.15.2 wins. The higher floor also means `REDIS_MCP_SANDBOX=1` only ever runs on an oam whose `--permission` covers all of `fs` and `child_process` and whose port grant is exact.
