@@ -106,7 +106,7 @@ See [SECURITY.md](./SECURITY.md) for vulnerability reporting.
 
 ## Configuration
 
-All env vars are read from the MCP server's environment:
+All env vars are read from the MCP server's environment. The last three are read by the `redis-mcp` launcher rather than the server, so they have no effect when a host runs `dist/index.js` directly:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -115,8 +115,12 @@ All env vars are read from the MCP server's environment:
 | `REDIS_COMMAND_TIMEOUT_MS` | `10000` | Per-command timeout. A command that runs longer is aborted so a wedged call can't hang the agent. |
 | `REDIS_CONNECT_TIMEOUT_MS` | `10000` | TCP connect timeout. Without this, a dead host hangs until the OS gives up (~2 minutes). |
 | `REDIS_MAX_KEYS` | `1000` | Cap on keys returned by a single scan, and on collection elements returned by `redis_get`. |
+| `REDIS_MAX_VALUE_BYTES` | `262144` | Cap, in bytes, on a string value returned by `redis_get` (256 KiB). A longer string comes back as its first `REDIS_MAX_VALUE_BYTES` bytes, with `truncated: true` and its full `length`. Clamped to `64000000` (64 MB); a non-numeric, zero, or negative value falls back to the default. Use a whole number of at least `1`: a fraction is rounded down, so a value between `0` and `1` does not act as a cap. |
 | `REDIS_SCAN_COUNT` | `100` | `COUNT` hint per `SCAN` iteration. Higher = fewer round-trips but more work per iteration. |
 | `REDIS_TLS_REJECT_UNAUTHORIZED` | unset | Set to `false` to skip TLS cert verification (for managed Redis using private-CA certs). Connection is still encrypted. |
+| `REDIS_MCP_RUNTIME` | `auto` | Which JS runtime executes the server: `auto` (prefer [oam](https://oamjs.org), fall back to Node), `oam` (require oam, fail if absent), `node` (never use oam). Case-insensitive; any other value - a typo like `nodejs`, or one with surrounding spaces - behaves as `auto` without a warning. See [Runtime](#runtime). |
+| `OAM_BIN` | unset | Explicit path to an `oam` binary, checked before PATH and the default install locations. If the path does not exist, no other location is tried. Ignored when the launcher is already running under oam 0.9.0+, unless `REDIS_MCP_SANDBOX=1`. |
+| `REDIS_MCP_SANDBOX` | unset | Exactly `1` runs the server under oam's `--permission` sandbox: filesystem and child processes denied, network limited to the host and port in `REDIS_URL` (port `6379` if the URL names none). If `REDIS_URL` names no host (e.g. `redis:///0`) or cannot be parsed, the network grant is left open; an IPv6 literal host (`redis://[::1]:6379`) is denied outright, so use a hostname. Any other value is ignored without a warning. It has no effect unless a fresh oam is actually spawned, and a fallback does not mention it, so pair it with `REDIS_MCP_RUNTIME=oam`, which exits instead of falling back. The launcher accepts oam 0.9.0+, but use a current oam: per oam's changelog, `--permission` did not cover all of `fs` and `child_process` until 0.9.1, and the port grant was not exact until 0.15.0. Not usable with `rediss://` yet - see [Runtime](#runtime). |
 
 ### Connecting to managed Redis (Upstash, ElastiCache, Redis Cloud, etc.)
 
@@ -130,6 +134,22 @@ Use a `rediss://` URL for TLS. If the provider serves a cert signed by a private
 ```
 
 This disables certificate-chain verification only - the connection is still TLS-encrypted end-to-end. Where you can install the CA, prefer `NODE_EXTRA_CA_CERTS` over disabling verification.
+
+If oam is installed, TLS also needs `REDIS_MCP_RUNTIME=node` for now - see [Runtime](#runtime).
+
+### Runtime
+
+The published `redis-mcp` command is a small launcher that prefers the [oam](https://oamjs.org) JavaScript runtime and falls back to Node. **If you do not have oam, nothing changes:** the fallback is automatic, and because npm has already started Node to run the launcher, it is an in-process `import()` of the server with no extra spawn.
+
+**TLS needs Node for now.** Under oam, a `rediss://` connection crashes the server on its first command (`TypeError: stream.setNoDelay is not a function`), and oam does not read `NODE_EXTRA_CA_CERTS`. If oam is installed and `REDIS_URL` uses `rediss://`, set `REDIS_MCP_RUNTIME=node` - which also rules out `REDIS_MCP_SANDBOX` for that instance.
+
+**How the runtime is chosen:**
+
+- **Already on oam.** If the launcher itself is running under oam 0.9.0+ (a host that runs `oam run` on the `bin`), the server is imported into that process: nothing is discovered or spawned, `OAM_BIN` is ignored, and `REDIS_MCP_RUNTIME=oam` is satisfied. `REDIS_MCP_SANDBOX=1` skips this step, because only a freshly spawned oam can apply `--permission`.
+- **Otherwise, discovery.** The launcher looks for oam - `OAM_BIN`, else the default install locations, else `PATH` - and spawns it if it is 0.9.0 or newer. Under `auto`, an older oam, or one that cannot be run to report its version, is not an error: the launcher says so on stderr and runs the server in-process instead. A missing oam - including an `OAM_BIN` path that does not exist - or one that fails to launch falls back the same way, silently (on Windows, an `oam.cmd` or `oam.bat` found on `PATH` is named on stderr). Once oam has started, a failure while running the server is a startup failure, not a fallback.
+- **Overrides.** `REDIS_MCP_RUNTIME=oam` turns every fallback into a startup failure. `REDIS_MCP_RUNTIME=node` skips discovery and runs the server in the launcher's own process.
+
+An in-process fallback carries no `--permission`, so with `REDIS_MCP_SANDBOX=1` under `auto` the server can end up **unsandboxed** without a message. Set `REDIS_MCP_RUNTIME=oam` alongside it when that is not acceptable.
 
 ## Troubleshooting
 

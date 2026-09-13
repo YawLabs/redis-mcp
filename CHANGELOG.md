@@ -13,6 +13,10 @@
 - **Windows: the launcher no longer hard-kills the server on the first Ctrl-C.** There are no POSIX signals on Windows — `child.kill(sig)` ignores the name and calls `TerminateProcess`, an immediate hard kill (verified: a child with a `SIGTERM` handler never runs it and dies with `code=null`). The launcher forwarded anyway, on the stated assumption that this was a "no-op on Windows", so it aborted the graceful shutdown the console's own Ctrl-C had just started and skipped the server's `process.on("exit")` cleanup. The console already delivers the event to the whole process group, so on Windows the launcher now forwards nothing.
 - **A wedged server no longer leaves the launcher hanging.** Forwarding was gated on `child.killed`, which records only that `kill()` was *called* — never that the child is gone — so every signal after the first was swallowed and there was no escape hatch. Escalation is now armed by a timer on the first signal: one press is enough, and a child still alive after a 2s grace window is killed. Using a timer rather than counting signals also stops the ordinary supervisor sequence (`SIGINT` then `SIGTERM` milliseconds apart) from being misread as impatience.
 
+### Documentation
+- **The README Configuration table now covers every variable the package reads.** `REDIS_MAX_VALUE_BYTES` (the 256 KiB `redis_get` string cap, clamped to 64 MB) and the launcher's `REDIS_MCP_RUNTIME`, `OAM_BIN` and `REDIS_MCP_SANDBOX` were missing. A new Runtime section explains the oam preference, the automatic fallback, the already-on-oam path, and when the sandbox silently does not apply.
+- **The README warns that TLS needs Node for now.** Under oam a `rediss://` connection crashes the server on its first command (`stream.setNoDelay is not a function`), and oam does not read `NODE_EXTRA_CA_CERTS`, so with oam installed a TLS instance needs `REDIS_MCP_RUNTIME=node`.
+
 ## [0.2.0] — 2026-08-07
 
 ### Added
