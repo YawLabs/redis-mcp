@@ -240,20 +240,67 @@ describe("launcher netGrant()", () => {
       ["", /not set/],
       ["  ", /not set/],
       ["/tmp/redis.sock", /unix socket path/],
+      ["/tmp/redis.sock?db=2", /unix socket path/],
+      // A bare "/" is a socket path to ioredis too, not a host-less URL.
+      ["/", /unix socket path/],
+      ["/?port=1", /unix socket path/],
       // A pathname on a scheme-less DSN is a socket path to ioredis, not a db.
       ["127.0.0.1:6391/2", /unix socket path/],
+      // ioredis takes a non-empty `path` from the query and ignores host and port.
+      ["redis://h?path=/tmp/redis.sock", /unix socket path/],
+      ["127.0.0.1:6379?path=/tmp/redis.sock", /unix socket path/],
       ["redis://[::1", /not a URL this launcher can parse/],
       ["redis://hunter2:[::1", /not a URL this launcher can parse/],
-      // ioredis would dial port NaN, -6391 or 70000 and fail on its own.
-      ["redis://h?port=abc", /port that is not a number from 0 to 65535/],
-      ["-6391", /port that is not a number from 0 to 65535/],
-      ["redis://?port=70000", /port that is not a number from 0 to 65535/],
+      // ioredis keeps an empty query host as "": which address that is belongs
+      // to the runtime, not to this function.
+      ["redis://?host=", /empty host/],
+      ["redis://?host=a&host=", /empty host/],
+      // oam splits a grant on commas and trims each entry, so these would widen
+      // into a grant for every port on the first host.
+      ["redis://127.0.0.1,cache.internal:6391", /cannot express/],
+      ["redis:///0?host=127.0.0.1,cache.internal&port=6391", /cannot express/],
+      ["redis://?host=%20a&port=1", /cannot express/],
+      // An empty query port is NaN to ioredis, not the default.
+      ["redis://h?port=", /port that is not a number from 1 to 65535/],
+      ["redis://h?port=1&port=", /port that is not a number from 1 to 65535/],
+      ["redis://h?port=abc", /port that is not a number from 1 to 65535/],
+      ["-6391", /port that is not a number from 1 to 65535/],
+      ["redis://?port=70000", /port that is not a number from 1 to 65535/],
+      ["redis://h:0", /port that is not a number from 1 to 65535/],
+      ["rediss://h:0", /port that is not a number from 1 to 65535/],
     ];
     for (const [dsn, reason] of cases) {
       const grant = netGrant(dsn);
       assert.equal(grant.flag, "--allow-net", JSON.stringify(dsn));
       assert.match(grant.open ?? "", reason, JSON.stringify(dsn));
-      assert.doesNotMatch(grant.open ?? "", /hunter2|::1|redis\.sock|6391|70000/, "the reason must not echo the URL");
+      assert.doesNotMatch(
+        grant.open ?? "",
+        /hunter2|::1|redis\.sock|6391|70000|cache\.internal|127\.0\.0\.1/,
+        "the reason must not echo the URL",
+      );
+    }
+  });
+
+  it("leaves the grant open exactly where ioredis would dial a unix socket", () => {
+    // The socket side of the parity check below: every DSN a real client
+    // resolves to a `path` gets the open grant, and says why.
+    for (const dsn of [
+      "/tmp/redis.sock",
+      "/tmp/redis.sock?db=2",
+      "/",
+      "/?port=1",
+      "127.0.0.1:6391/2",
+      "host/2",
+      "redis://h?path=/tmp/redis.sock",
+      "127.0.0.1:6379?path=/tmp/redis.sock",
+    ]) {
+      const client = new Redis(dsn, { lazyConnect: true });
+      try {
+        assert.ok(client.options.path, `${JSON.stringify(dsn)} must be a unix socket to ioredis`);
+        assert.match(netGrant(dsn).open ?? "", /unix socket path/, JSON.stringify(dsn));
+      } finally {
+        client.disconnect();
+      }
     }
   });
 
@@ -286,6 +333,8 @@ describe("launcher netGrant()", () => {
       ":hunter2@127.0.0.1:6379",
       "cache.internal",
       "127.0.0.1:6391\n",
+      "127.0.0.1:6379/",
+      "redis://h?path=",
       "6391",
       "6391 ",
       "6391\n",
@@ -295,7 +344,7 @@ describe("launcher netGrant()", () => {
     ]) {
       const client = new Redis(dsn, { lazyConnect: true });
       try {
-        assert.equal(client.options.path, undefined, `${JSON.stringify(dsn)} must be a TCP endpoint to ioredis`);
+        assert.ok(!client.options.path, `${JSON.stringify(dsn)} must be a TCP endpoint to ioredis`);
         assert.equal(
           netGrant(dsn).flag,
           `--allow-net=${client.options.host}:${client.options.port}`,
@@ -489,7 +538,16 @@ describe("launcher sandbox grant, as passed to the spawned oam", () => {
     assert.equal(prefix.length, 3, JSON.stringify(argv));
     assert.equal(prefix[0], "--permission");
     assert.equal(prefix[1], "--allow-net=::1:6391");
-    assert.match(prefix[2] ?? "", /^--allow-env=.*\bREDIS_URL\b/);
+    // The env grant must be exactly what the bundle reads: a variable it reads
+    // but the grant omits is silently absent under --permission, and one the
+    // grant lists but nothing reads is an unexplained widening.
+    const bundleReads = [
+      ...new Set(
+        [...readFileSync(DIST_BIN, "utf-8").matchAll(/process\.env\.([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]),
+      ),
+    ].sort();
+    assert.ok(bundleReads.includes("REDIS_URL"), `the bundle scan found no REDIS_URL read: ${bundleReads.join(",")}`);
+    assert.equal(prefix[2], `--allow-env=${bundleReads.join(",")}`);
   });
 
   it("pins a scheme-less REDIS_URL the way ioredis reads it, instead of opening the grant", {
