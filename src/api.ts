@@ -103,10 +103,12 @@ export function getMaxKeys(): number {
   const parsed = Number(raw);
   // Upper-clamp at 1_000_000: a fat-fingered REDIS_MAX_KEYS (e.g. 1e8) would
   // otherwise let a single scan tool call accumulate that many keys into memory
-  // and the JSON reply. Lower bound stays > 0 (else default). Mirrors the
-  // per-call schema caps (count <= 10000, sampleSize <= 5000), which were
-  // already bounded -- only the env-derived ceilings were open-ended.
-  if (!(Number.isFinite(parsed) && parsed > 0)) return 1000;
+  // and the JSON reply. Mirrors the per-call schema caps (count <= 10000,
+  // sampleSize <= 5000), which were already bounded -- only the env-derived
+  // ceilings were open-ended. The lower bound is 1, checked BEFORE flooring:
+  // a value in (0, 1) used to pass a `> 0` check and floor to 0, and a cap of
+  // 0 makes every scan return no keys while reporting itself truncated.
+  if (!(Number.isFinite(parsed) && parsed >= 1)) return 1000;
   return Math.min(1_000_000, Math.floor(parsed));
 }
 
@@ -116,8 +118,10 @@ export function getScanCount(): number {
   const parsed = Number(raw);
   // Upper-clamp at 1_000_000 (an absolute sanity ceiling, far above any sane
   // COUNT hint): a pathological value would hold the single-threaded Redis
-  // event loop for a long time per round-trip. Lower bound stays > 0.
-  if (!(Number.isFinite(parsed) && parsed > 0)) return 100;
+  // event loop for a long time per round-trip. The lower bound is 1, checked
+  // BEFORE flooring: a value in (0, 1) used to floor to 0, and Redis rejects
+  // `SCAN ... COUNT 0` with a syntax error, so every scan tool call failed.
+  if (!(Number.isFinite(parsed) && parsed >= 1)) return 100;
   return Math.min(1_000_000, Math.floor(parsed));
 }
 
@@ -128,12 +132,15 @@ export function getScanCount(): number {
  * Default 256 KiB: large enough to return ordinary cache values whole, small
  * enough that a giant blob is truncated (with `truncated: true` + the full
  * `length`). Env-tunable via REDIS_MAX_VALUE_BYTES; clamped to a 64 MB ceiling.
+ * The lower bound is 1, checked BEFORE flooring: a value in (0, 1) used to
+ * floor to 0, and a cap of 0 sends `GETRANGE key 0 -1`, which Redis reads as
+ * the whole string -- so the cap was off and `truncated` was wrongly true.
  */
 export function getMaxValueBytes(): number {
   const raw = process.env.REDIS_MAX_VALUE_BYTES;
   if (!raw) return 262_144;
   const parsed = Number(raw);
-  if (!(Number.isFinite(parsed) && parsed > 0)) return 262_144;
+  if (!(Number.isFinite(parsed) && parsed >= 1)) return 262_144;
   return Math.min(64_000_000, Math.floor(parsed));
 }
 

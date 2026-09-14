@@ -63,11 +63,20 @@ describe("getMaxKeys", () => {
     assert.equal(getMaxKeys(), 99);
   });
 
-  it("falls back to 1000 for invalid values", () => {
-    for (const v of ["abc", "-5", "0", ""]) {
+  it("falls back to 1000 for invalid values, including a value below 1", () => {
+    // "0.5", "0.999" and "1e-3" pass a `> 0` check and floor to 0, and a cap
+    // of 0 returns no keys while reporting the scan truncated (#13).
+    for (const v of ["abc", "-5", "0", "", "0.5", "0.999", "1e-3"]) {
       process.env.REDIS_MAX_KEYS = v;
       assert.equal(getMaxKeys(), 1000, `REDIS_MAX_KEYS=${JSON.stringify(v)} should default`);
     }
+  });
+
+  it("accepts exactly 1, the smallest cap that still caps", () => {
+    process.env.REDIS_MAX_KEYS = "1";
+    assert.equal(getMaxKeys(), 1);
+    process.env.REDIS_MAX_KEYS = "1.5";
+    assert.equal(getMaxKeys(), 1);
   });
 
   it("clamps absurdly large values to 1_000_000", () => {
@@ -100,6 +109,16 @@ describe("getScanCount", () => {
     assert.equal(getScanCount(), 100);
   });
 
+  it("falls back to 100 for a value below 1, which would floor to a COUNT Redis rejects", () => {
+    // Redis answers `SCAN ... COUNT 0` with a syntax error (#13).
+    for (const v of ["0.5", "0.999", "1e-3"]) {
+      process.env.REDIS_SCAN_COUNT = v;
+      assert.equal(getScanCount(), 100, `REDIS_SCAN_COUNT=${JSON.stringify(v)} should default`);
+    }
+    process.env.REDIS_SCAN_COUNT = "1";
+    assert.equal(getScanCount(), 1, "exactly 1 is the smallest COUNT Redis accepts");
+  });
+
   it("clamps absurdly large values to 1_000_000", () => {
     process.env.REDIS_SCAN_COUNT = "50000000";
     assert.equal(getScanCount(), 1_000_000);
@@ -126,10 +145,14 @@ describe("getMaxValueBytes", () => {
     assert.equal(getMaxValueBytes(), 1024);
     process.env.REDIS_MAX_VALUE_BYTES = "1024.9";
     assert.equal(getMaxValueBytes(), 1024);
-    for (const v of ["abc", "-5", "0", ""]) {
+    // A value below 1 used to floor to 0, which sends `GETRANGE key 0 -1` --
+    // the whole string -- while reporting `truncated: true` (#13).
+    for (const v of ["abc", "-5", "0", "", "0.5", "0.999", "1e-3"]) {
       process.env.REDIS_MAX_VALUE_BYTES = v;
       assert.equal(getMaxValueBytes(), 262_144, `REDIS_MAX_VALUE_BYTES=${JSON.stringify(v)} should default`);
     }
+    process.env.REDIS_MAX_VALUE_BYTES = "1";
+    assert.equal(getMaxValueBytes(), 1, "exactly 1 is the smallest cap that still caps");
   });
 
   it("clamps absurdly large values to the 64 MB ceiling", () => {
