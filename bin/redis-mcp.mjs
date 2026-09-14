@@ -88,8 +88,9 @@
  *
  * The net grant is DERIVED from REDIS_URL at launch, for the same reason as
  * postgres-mcp: the one endpoint it may reach is the one it was pointed at, with
- * host and port both pinned because grants are prefix-matched. Filesystem and
- * child-process stay denied.
+ * host and port both pinned because a grant naming only a host admits every
+ * port on it. Filesystem and child-process stay denied. When REDIS_URL names no
+ * host or does not parse, the grant is left open and the launcher says so.
  *
  * Opt-in, not default: a denied environment variable is ABSENT from process.env
  * rather than throwing, so an under-granted REDIS_URL reads as "not configured".
@@ -280,13 +281,54 @@ function runtimePlan({ mode, hostOam, sandbox }) {
 }
 
 /**
+ * The `--allow-net` flag that pins the sandbox to the endpoint in `dsn`
+ * (REDIS_URL), and, when it cannot be pinned, why: `{ flag, open }`, where
+ * `open` is null for a pinned grant and a short reason for an open one.
+ *
+ * Derived, not hardcoded: the only endpoint this server may reach is the one it
+ * was configured to reach. oam (0.15.0 and later) matches a socket grant that
+ * carries a port exactly against "host:port", and a grant naming only a host
+ * admits every port on it -- so pin both, defaulting to ioredis's 6379.
+ *
+ * The host must be spelled the way oam spells the resource it checks, which is
+ * the host ioredis dials: `format!("{host}:{port}")` over the bare address. WHATWG
+ * `URL#hostname` keeps the brackets on an IPv6 literal (`[::1]`) and ioredis
+ * strips them (`ioredis/built/utils/index.js`, `parseURL`), so the brackets come
+ * off here too. Measured on oam 0.15.2: `--allow-net=[::1]:6391` denies a
+ * connect to ::1 port 6391 (`resource: '::1:6391'`); `--allow-net=::1:6391`
+ * admits it and still denies ::1 port 63910. There is no host/port ambiguity to
+ * resolve, because the match is a whole-string comparison, not a parse. Both
+ * sides also normalise the same way: WHATWG compresses the address
+ * (`[0:0:0:0:0:0:0:1]` becomes `[::1]`) before either of them sees it.
+ *
+ * A URL with no host (`redis:///0`) or one WHATWG cannot parse (`127.0.0.1:6379`,
+ * with no scheme, which ioredis still accepts) gets a bare `--allow-net` rather
+ * than a guessed narrow one, because a wrong narrow grant fails at connect time
+ * with a denial that does not name the cause. The caller reports that the
+ * sandbox's network is open. `open` never contains the URL: it can carry a
+ * password.
+ */
+function netGrant(dsn) {
+  if (!dsn) return { flag: "--allow-net", open: "REDIS_URL is not set" };
+  let url;
+  try {
+    url = new URL(dsn);
+  } catch {
+    return { flag: "--allow-net", open: "REDIS_URL is not a URL this launcher can parse" };
+  }
+  if (!url.hostname) return { flag: "--allow-net", open: "REDIS_URL names no host" };
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  return { flag: `--allow-net=${host}:${url.port || 6379}`, open: null };
+}
+
+/**
  * The `--permission` grant list, or [] when the sandbox is not requested.
  *
  * These are oam's PROCESS-level flags: they belong before the `run` subcommand,
  * not after it. `oam run --permission file.js` is rejected outright, which is a
  * good failure but only because it is loud -- ordering here is load-bearing.
  *
- * Net grants prefix-match `host` for fetch and `host:port` for sockets.
+ * The net grant comes from `netGrant` below.
  * A denied environment variable is ABSENT from process.env rather than throwing,
  * so the env list below is derived from what the bundle actually reads; trimming
  * it produces silent misbehaviour, not a clear denial.
@@ -294,24 +336,9 @@ function runtimePlan({ mode, hostOam, sandbox }) {
 function sandboxFlags() {
   if (process.env.REDIS_MCP_SANDBOX !== "1") return [];
 
-  // Derived, not hardcoded: the only endpoint this server may reach is the one
-  // it was configured to reach. Grants are prefix-matched against "host:port"
-  // for sockets, so host alone would also admit any other port on that host --
-  // pin both. A DSN we cannot parse falls back to a bare grant rather than a
-  // broken one, because a wrong narrow grant fails at connect time.
-  const dsn = process.env.REDIS_URL ?? null;
-  let netFlag = "--allow-net";
-  if (dsn) {
-    try {
-      const u = new URL(dsn);
-      if (u.hostname) netFlag = `--allow-net=${u.hostname}:${u.port || 6379}`;
-    } catch {
-      // Unparseable REDIS_URL: leave the grant open. The server will fail on
-      // its own connection error, which names the real problem.
-    }
-  }
+  const netFlag = netGrant(process.env.REDIS_URL).flag;
 
-  const env = ["ALLOW_WRITES","DEBUG","REDIS_COMMAND_TIMEOUT_MS","REDIS_CONNECT_TIMEOUT_MS","REDIS_MAX_KEYS","REDIS_MAX_VALUE_BYTES","REDIS_SCAN_COUNT","REDIS_TLS_REJECT_UNAUTHORIZED","REDIS_URL"];
+  const env =["ALLOW_WRITES","DEBUG","REDIS_COMMAND_TIMEOUT_MS","REDIS_CONNECT_TIMEOUT_MS","REDIS_MAX_KEYS","REDIS_MAX_VALUE_BYTES","REDIS_SCAN_COUNT","REDIS_TLS_REJECT_UNAUTHORIZED","REDIS_URL"];
 
   const flags = ["--permission", netFlag, `--allow-env=${env.join(",")}`];
   return flags;
@@ -622,6 +649,16 @@ if (plan === "in-process") {
   if (chosen) {
     if (overrideNote) {
       await errSync(`redis-mcp: ${overrideNote}; using ${chosen.path} (oam ${chosen.version.join(".")}).\n`);
+    }
+    // A sandbox whose network grant silently opened up would be worse than no
+    // note at all. Only when the sandbox is actually about to be applied, and
+    // only for a REDIS_URL that is set: an unset one fails in the server with
+    // its own, clearer message.
+    const grant = netGrant(process.env.REDIS_URL);
+    if (sandboxFlags().length > 0 && grant.open && process.env.REDIS_URL) {
+      await errSync(
+        `redis-mcp: REDIS_MCP_SANDBOX=1, but ${grant.open}, so the sandbox cannot pin its network grant to the Redis endpoint and leaves network access open.\n`,
+      );
     }
     // `--` separates oam's own flags from the script's argv, so `redis-mcp
     // --version` and any host-supplied flags survive the hop unchanged. The

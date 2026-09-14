@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { parseURL } from "ioredis/built/utils/index.js";
 
 // Resolve via import.meta.url so this works regardless of process.cwd(). The
 // compiled file lives in dist/, one level below the repo root, exactly like
@@ -19,6 +20,7 @@ type Plan = "in-process" | "discover" | "handoff-node";
 type RuntimePlan = (ctx: { mode: string; hostOam: string | undefined; sandbox: boolean }) => Plan;
 type Candidate = { path: string; version: number[] | null };
 type PickNewest = (candidates: Candidate[]) => Candidate | null;
+type NetGrant = (dsn: string | undefined) => { flag: string; open: string | null };
 
 /** Pull named declarations out of the launcher source, loudly. */
 function extract(patterns: RegExp[]): string {
@@ -169,6 +171,66 @@ describe("launcher pickNewest()", () => {
   });
 });
 
+describe("launcher netGrant()", () => {
+  const netGrant = new Function(
+    `${extract([/function netGrant\(dsn\) \{[\s\S]*?\n\}/])}\nreturn netGrant;`,
+  )() as NetGrant;
+
+  it("pins an IPv6 literal without its brackets, the way oam spells the resource", () => {
+    // The bug (#14): WHATWG `URL#hostname` keeps the brackets, so the launcher
+    // passed `--allow-net=[::1]:6391`, which oam never matches -- oam checks
+    // `::1:6391` -- and every connection was denied.
+    assert.deepEqual(netGrant("redis://[::1]:6391"), { flag: "--allow-net=::1:6391", open: null });
+    assert.deepEqual(netGrant("rediss://user:pw@[2001:db8::1]/0"), {
+      flag: "--allow-net=2001:db8::1:6379",
+      open: null,
+    });
+    // WHATWG compresses the address first, so the grant is the canonical form.
+    assert.deepEqual(netGrant("redis://[0:0:0:0:0:0:0:1]:6391"), { flag: "--allow-net=::1:6391", open: null });
+  });
+
+  it("pins host and port for hostnames and IPv4, defaulting to 6379", () => {
+    assert.deepEqual(netGrant("redis://127.0.0.1:6391"), { flag: "--allow-net=127.0.0.1:6391", open: null });
+    assert.deepEqual(netGrant("redis://:secret@cache.internal/2"), {
+      flag: "--allow-net=cache.internal:6379",
+      open: null,
+    });
+  });
+
+  it("leaves the grant open, with a reason that never repeats the URL, when it cannot be pinned", () => {
+    const cases: [string | undefined, RegExp][] = [
+      [undefined, /not set/],
+      ["", /not set/],
+      ["redis:///0", /names no host/],
+      [":hunter2@127.0.0.1:6379", /not a URL this launcher can parse/],
+    ];
+    for (const [dsn, reason] of cases) {
+      const grant = netGrant(dsn);
+      assert.equal(grant.flag, "--allow-net", JSON.stringify(dsn));
+      assert.match(grant.open ?? "", reason, JSON.stringify(dsn));
+      assert.doesNotMatch(grant.open ?? "", /hunter2|127\.0\.0\.1/, "the reason must not echo the URL");
+    }
+  });
+
+  it("grants exactly the host and port ioredis dials", () => {
+    // The two sides parse REDIS_URL independently; this is what keeps them from
+    // drifting. A grant host that differs from ioredis's by one character (a
+    // bracket) is a sandbox that denies every connection.
+    for (const dsn of [
+      "redis://[::1]:6391",
+      "rediss://[2001:db8::1]",
+      "redis://[::ffff:127.0.0.1]:7000",
+      "redis://[0:0:0:0:0:0:0:1]:6391",
+      "redis://localhost",
+      "redis://:pw@10.0.0.5:6380/1",
+    ]) {
+      const dialled = parseURL(dsn) as { host?: string; port?: string };
+      const expected = `--allow-net=${dialled.host}:${dialled.port ?? 6379}`;
+      assert.equal(netGrant(dsn).flag, expected, dsn);
+    }
+  });
+});
+
 type LauncherRun = { stdout: string; stderr: string; code: number | null };
 
 /**
@@ -297,6 +359,43 @@ describe("launcher on an oam host", () => {
     const run = await runLauncher("0.15.1");
     assert.equal(servedInProcess(run), false, `a below-floor host must not shortcut, got ${JSON.stringify(run)}`);
     assert.notEqual(run.code, 0);
+    assert.doesNotMatch(run.stderr, /^redis-mcp: /m);
+  });
+});
+
+describe("launcher sandbox grant, as passed to the spawned oam", () => {
+  /**
+   * With OAM_BIN pinned to Node (see runLauncher), the "oam" the launcher spawns
+   * is Node, which rejects oam's process-level flags and echoes each one back
+   * verbatim (`node: bad option: --allow-net=...`). That turns stderr into a
+   * record of the exact grant the launcher built -- the wiring, not just
+   * netGrant in isolation.
+   */
+  const passedGrant = (stderr: string) => /bad option: (--allow-net\S*)\s*$/m.exec(stderr)?.[1];
+
+  it("passes an IPv6 grant without brackets", { skip, timeout }, async () => {
+    const run = await runLauncher(undefined, { REDIS_MCP_SANDBOX: "1", REDIS_URL: "redis://[::1]:6391" });
+    assert.equal(passedGrant(run.stderr), "--allow-net=::1:6391", JSON.stringify(run));
+    assert.doesNotMatch(run.stderr, /^redis-mcp: /m, "a pinned grant needs no note");
+  });
+
+  it("says so on stderr when the grant has to stay open, without echoing REDIS_URL", { skip, timeout }, async () => {
+    // No scheme: WHATWG cannot parse it, though ioredis would still connect.
+    const run = await runLauncher(undefined, { REDIS_MCP_SANDBOX: "1", REDIS_URL: ":hunter2@127.0.0.1:6379" });
+    assert.equal(passedGrant(run.stderr), "--allow-net", JSON.stringify(run));
+    assert.match(
+      run.stderr,
+      /^redis-mcp: REDIS_MCP_SANDBOX=1, but REDIS_URL is not a URL this launcher can parse, so the sandbox cannot pin its network grant to the Redis endpoint and leaves network access open\.$/m,
+    );
+    assert.doesNotMatch(run.stderr, /hunter2/, "REDIS_URL can carry a password; it must never reach stderr");
+  });
+
+  it("stays quiet about an open grant when REDIS_URL is unset, which the server reports itself", {
+    skip,
+    timeout,
+  }, async () => {
+    const run = await runLauncher(undefined, { REDIS_MCP_SANDBOX: "1" });
+    assert.equal(passedGrant(run.stderr), "--allow-net", JSON.stringify(run));
     assert.doesNotMatch(run.stderr, /^redis-mcp: /m);
   });
 });

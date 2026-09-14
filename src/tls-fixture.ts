@@ -139,13 +139,15 @@ export interface TlsRespServer {
 }
 
 /**
- * Listen on a random 127.0.0.1 port with a fresh self-signed certificate and
- * answer like a Redis with nothing in it: `PING` -> `+PONG`, `INFO` -> an empty
- * bulk string (enough for ioredis's ready check), `QUIT` -> `+OK` and close,
- * anything else -> `-ERR`. Clients must skip verification
- * (`rejectUnauthorized: false`), as the certificate is self-signed.
+ * Listen on a random port on `host` (127.0.0.1 unless told otherwise, e.g.
+ * `::1`) with a fresh self-signed certificate and answer like a Redis with
+ * nothing in it: `PING` -> `+PONG`, `INFO` -> an empty bulk string (enough for
+ * ioredis's ready check), `QUIT` -> `+OK` and close, anything else -> `-ERR`.
+ * Clients must skip verification (`rejectUnauthorized: false`), as the
+ * certificate is self-signed. Rejects when `host` cannot be bound, as `::1` on
+ * a machine with IPv6 disabled.
  */
-export function startTlsRespServer(): Promise<TlsRespServer> {
+export function startTlsRespServer(host = "127.0.0.1"): Promise<TlsRespServer> {
   const { key, cert } = makeSelfSignedCert();
   const received: string[][] = [];
   const sockets = new Set<TLSSocket>();
@@ -178,7 +180,7 @@ export function startTlsRespServer(): Promise<TlsRespServer> {
   });
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(0, host, () => {
       resolve({
         port: (server.address() as AddressInfo).port,
         received,

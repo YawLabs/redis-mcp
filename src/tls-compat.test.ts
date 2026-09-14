@@ -592,6 +592,39 @@ describe(`rediss:// under a real oam${"path" in oam ? ` (${oam.version} at ${oam
     assert.equal(run.code, 0);
   });
 
+  it("answers PING inside the sandbox for an IPv6 literal REDIS_URL", { timeout }, async (t) => {
+    // #14: the launcher used to grant `--allow-net=[::1]:<port>`, which oam
+    // never matches (it checks `::1:<port>`), so every tool call inside the
+    // sandbox came back "Access to this API has been restricted".
+    let v6: TlsRespServer;
+    try {
+      v6 = await startTlsRespServer("::1");
+    } catch (err) {
+      t.skip(`cannot listen on ::1 here (${(err as NodeJS.ErrnoException).code ?? err})`);
+      return;
+    }
+    try {
+      const run = await mcpPing(
+        process.execPath,
+        [LAUNCHER],
+        {
+          ...env,
+          REDIS_URL: `rediss://[::1]:${v6.port}`,
+          OAM_BIN: oamPath,
+          REDIS_MCP_RUNTIME: "oam",
+          REDIS_MCP_SANDBOX: "1",
+        },
+        t.signal,
+      );
+      assert.deepEqual(run.results, [PONG], JSON.stringify(run));
+      assert.match(run.stderr, servedByOam);
+      assert.doesNotMatch(run.stderr, /restricted|ERR_ACCESS_DENIED/);
+      assert.equal(run.code, 0);
+    } finally {
+      await v6.close();
+    }
+  });
+
   it("reconnects after the server drops the connection, instead of timing out forever", { timeout }, async (t) => {
     // A managed Redis ends idle connections. oam 0.15.2's TLS socket emits
     // `end` and then nothing, so without the shim's close-on-end ioredis never
