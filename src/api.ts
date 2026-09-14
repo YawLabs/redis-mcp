@@ -42,6 +42,7 @@
  */
 
 import { Redis } from "ioredis";
+import { TlsCompatConnector } from "./tls-compat.js";
 import { classifyCommand } from "./tools/commands.js";
 
 let client: Redis | null = null;
@@ -195,6 +196,10 @@ export function getClient(): Redis {
     // enough that a genuinely dead host fails within ~1.4s of total wait.
     retryStrategy: (times) => (times > 3 ? null : 200 * 2 ** (times - 1)),
     ...(tls ? { tls: { rejectUnauthorized: tls.rejectUnauthorized } } : {}),
+    // ioredis's own connector, plus the socket members oam's TLS stream is
+    // missing (YawLabs/oam#132). On Node it changes nothing; without it a
+    // rediss:// URL under oam crashes the process on the first command.
+    Connector: TlsCompatConnector,
   });
   // ioredis emits 'error' for connection-level failures. Log to stderr so the
   // stdio MCP protocol channel (stdout) stays clean. Without a listener,

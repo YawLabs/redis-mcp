@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **`rediss://` no longer crashes the server under oam.** oam's `tls.TLSSocket` does not extend `net.Socket`, so it has no `setNoDelay`, `setKeepAlive` or `setTimeout` and no `connecting` flag ([YawLabs/oam#132](https://github.com/YawLabs/oam/issues/132)). ioredis calls all three on every connection, and the first, `stream.setNoDelay(true)`, threw from a connect callback — an uncaught `TypeError` that killed the process on the first tool call. With the default `REDIS_MCP_RUNTIME=auto` and an oam 0.15.2+ installed, that was every managed-Redis user. The client now opens its sockets through a connector that feature-detects each missing member and supplies it (chainable no-ops for the first two, matching oam's own `net.Socket`; a real timer for `setTimeout`, so the connect timeout still fires; and a `connecting` flag that clears on `secureConnect`, without which ioredis wrote before the handshake and oam answered `TLSSocket: not connected`). Nothing is keyed on the runtime: a Node socket has everything and is left alone, and an oam release that closes #132 disables the shim by itself. The first shimmed socket is noted once on stderr. Tested against a local TLS server under Node, and under a real oam when one is installed, on the `oam run` host path, the discovery path, and inside the sandbox.
+
+### Documentation
+- **The README no longer says TLS needs Node.** The remaining oam gap is that it does not read `NODE_EXTRA_CA_CERTS`, so a private CA under oam needs `REDIS_TLS_REJECT_UNAUTHORIZED=false` or `REDIS_MCP_RUNTIME=node`; the sandbox row no longer excludes `rediss://`.
+
 ## [0.3.5] — 2026-09-13
 
 ### Fixed
