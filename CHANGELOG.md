@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- npm and MCP Registry listing metadata: bugs URL, core keywords, and server.json title/repository/websiteUrl
+
 ## [0.3.5] — 2026-09-13
 
 ### Fixed

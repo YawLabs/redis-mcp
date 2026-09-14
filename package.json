@@ -9,6 +9,9 @@
     "type": "git",
     "url": "git+https://github.com/YawLabs/redis-mcp.git"
   },
+  "bugs": {
+    "url": "https://github.com/YawLabs/redis-mcp/issues"
+  },
   "keywords": [
     "redis",
     "valkey",
@@ -27,7 +30,8 @@
     "slowlog",
     "keyspace",
     "dba",
-    "health-check"
+    "health-check",
+    "ai-agents"
   ],
   "type": "module",
   "main": "dist/index.js",
