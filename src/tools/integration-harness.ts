@@ -4,9 +4,11 @@
  * which reads REDIS_URL, so the integration boundary is exercised for real
  * (no mocking of the ioredis client).
  *
- * When REDIS_URL is unset the suite skips cleanly (the runner treats a
- * --integration run with zero applicable tests as a no-op, and node:test marks
- * skipped tests as such rather than failing).
+ * When REDIS_URL is unset the suite skips cleanly: the runner still finds the
+ * integration files, and each passes `{ skip: skipReason() }` to its top-level
+ * describe(), so node:test skips the whole suite rather than failing. TAP shows
+ * each suite as `# SKIP <reason>`, but the totals read `# tests 0` and
+ * `# skipped 0` -- a skipped suite is not counted as a skipped test.
  *
  * NOTE: this file deliberately has no `.test.` in its name so the test runner
  * (scripts/run-tests.mjs) does NOT execute it directly -- it is imported by the
