@@ -4,6 +4,7 @@
 
 ### Changed
 - npm and MCP Registry listing metadata: bugs URL, core keywords, and server.json title/repository/websiteUrl
+- `release.sh` writes a `## [x.y.z]` changelog entry for every release — promoting `[Unreleased]` when it has content, otherwise generating one from the commit subjects since the previous tag — keeps the Keep-a-Changelog link references current when the file has them, and takes the GitHub release notes from that entry instead of from `git log` subjects. Before this, the script never touched `CHANGELOG.md` at all: `[Unreleased]` was promoted by hand when someone remembered and not otherwise (0.4.0 below is backfilled), and every GitHub release page showed raw commit subjects.
 
 ### Fixed
 - **`rediss://` no longer crashes the server under oam.** oam's `tls.TLSSocket` does not extend `net.Socket`, so it has no `setNoDelay`, `setKeepAlive` or `setTimeout` ([YawLabs/oam#132](https://github.com/YawLabs/oam/issues/132)). ioredis calls all three on every connection it opens with this server's options, and the first, `stream.setNoDelay(true)`, threw from a connect callback — an uncaught `TypeError` that killed the process on the first tool call. With the default `REDIS_MCP_RUNTIME=auto` and an oam 0.15.2+ installed, that was every `rediss://` user. The client now opens its sockets through a connector that feature-detects each missing member and supplies it: chainable no-ops for the first two, matching oam's own `net.Socket`, and a real timer for `setTimeout`, so the connect timeout still fires. Two more gaps, not in oam#132 as filed, get the same treatment. The socket has no `connecting` flag, without which ioredis wrote before the handshake and oam answered `TLSSocket: not connected`; the shim supplies one that clears on `secureConnect`. And the socket never closes itself after the server hangs up — it emits `end` and then nothing — so a managed Redis dropping an idle connection would have left the client `ready` on a dead socket, every later command timing out and no reconnect ever attempted; the shim destroys it on `end`, as Node does, and ioredis reconnects. Nothing is keyed on the runtime: a Node socket has everything and is left alone, member by member, so an oam that has these members — oam's main branch does since [YawLabs/oam#141](https://github.com/YawLabs/oam/pull/141), after 0.15.2 — turns the shim off without a change here. The first shimmed socket is noted once on stderr.
@@ -11,6 +12,17 @@
 
 ### Documentation
 - **The README no longer says TLS needs Node.** The remaining oam gap is that it does not read `NODE_EXTRA_CA_CERTS` ([YawLabs/oam#136](https://github.com/YawLabs/oam/issues/136)), so a private CA under oam needs `REDIS_TLS_REJECT_UNAUTHORIZED=false` or `REDIS_MCP_RUNTIME=node`; the sandbox row no longer excludes `rediss://`.
+
+## [0.4.0] — 2026-09-13
+
+### Fixed
+- **`npm run test:integration` fails when it finds no test files.** The test runner carried a carve-out that treated a zero-file `--integration` run as a successful no-op, left over from before any integration tests were committed — three are. A packaging or glob mistake that dropped every `dist/tools/*.integration.test.js` would have reported exit 0 with nothing run, exactly the shape [#7](https://github.com/YawLabs/redis-mcp/issues/7) describes. Finding no matching files is now an error that exits 1 in both modes, and the message says when the `--integration` filter was on. The header comment in `src/tools/integration-harness.ts`, which credited that no-op for the clean skip, now describes what actually happens: each suite skips itself at the `describe()` level through `skipReason()` when `REDIS_URL` is unset, so a run without one reports 3 suites and 0 tests.
+
+### Changed
+- **`release.sh` waits for npm to serve the new version before publishing to the MCP Registry.** `npm publish` returns once the registry accepts the tarball, but the version is not yet readable from npm's CDN-backed read path, and the MCP Registry validates by reading it — so the registry step could fail with `version '<x>' was not found (status: 404)` and need a second run (ssh-mcp 0.15.3 did; aws-mcp did on three consecutive releases). The script now polls the exact URL the registry's npm validator builds, `https://registry.npmjs.org/@yawlabs%2Fredis-mcp/<version>`, with `curl` rather than `npm view` (whose five-minute metadata cache can outlast the wait), and warns rather than fails at the 300s cap so `mcp-publisher` still reports its own precise error. `SKIP_NPM_WAIT=1` bypasses the wait and `NPM_WAIT_TIMEOUT_S` retunes it. Release tooling only; the published package is unchanged.
+
+### Documentation
+- README: the X follow badge moved from the top of the page to the bottom, so the description leads on npm and GitHub.
 
 ## [0.3.5] — 2026-09-13
 
