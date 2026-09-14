@@ -65,7 +65,8 @@ describe("getMaxKeys", () => {
 
   it("falls back to 1000 for invalid values, including a value below 1", () => {
     // "0.5", "0.999" and "1e-3" pass a `> 0` check and floor to 0, and a cap
-    // of 0 returns no keys while reporting the scan truncated (#13).
+    // of 0 returns a whole list or zset from redis_get (`LRANGE key 0 -1`)
+    // with `truncated: false`, and no keys from any scan (#13).
     for (const v of ["abc", "-5", "0", "", "0.5", "0.999", "1e-3"]) {
       process.env.REDIS_MAX_KEYS = v;
       assert.equal(getMaxKeys(), 1000, `REDIS_MAX_KEYS=${JSON.stringify(v)} should default`);
@@ -110,7 +111,8 @@ describe("getScanCount", () => {
   });
 
   it("falls back to 100 for a value below 1, which would floor to a COUNT Redis rejects", () => {
-    // Redis answers `SCAN ... COUNT 0` with a syntax error (#13).
+    // Redis answers `SCAN ... COUNT 0` with a syntax error, so every call that
+    // used the env value (redis_advisor, redis_scan without `count`) failed (#13).
     for (const v of ["0.5", "0.999", "1e-3"]) {
       process.env.REDIS_SCAN_COUNT = v;
       assert.equal(getScanCount(), 100, `REDIS_SCAN_COUNT=${JSON.stringify(v)} should default`);

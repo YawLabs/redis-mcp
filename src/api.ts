@@ -106,8 +106,9 @@ export function getMaxKeys(): number {
   // and the JSON reply. Mirrors the per-call schema caps (count <= 10000,
   // sampleSize <= 5000), which were already bounded -- only the env-derived
   // ceilings were open-ended. The lower bound is 1, checked BEFORE flooring:
-  // a value in (0, 1) used to pass a `> 0` check and floor to 0, and a cap of
-  // 0 makes every scan return no keys while reporting itself truncated.
+  // a value in (0, 1) used to pass a `> 0` check and floor to 0. A cap of 0
+  // sent `LRANGE`/`ZRANGE key 0 -1` from redis_get -- the whole list or zset,
+  // with `truncated: false` -- and made every scan return no keys.
   if (!(Number.isFinite(parsed) && parsed >= 1)) return 1000;
   return Math.min(1_000_000, Math.floor(parsed));
 }
@@ -120,7 +121,8 @@ export function getScanCount(): number {
   // COUNT hint): a pathological value would hold the single-threaded Redis
   // event loop for a long time per round-trip. The lower bound is 1, checked
   // BEFORE flooring: a value in (0, 1) used to floor to 0, and Redis rejects
-  // `SCAN ... COUNT 0` with a syntax error, so every scan tool call failed.
+  // `SCAN ... COUNT 0` with a syntax error, so every call that used this
+  // value (redis_advisor, and redis_scan without its own `count`) failed.
   if (!(Number.isFinite(parsed) && parsed >= 1)) return 100;
   return Math.min(1_000_000, Math.floor(parsed));
 }
