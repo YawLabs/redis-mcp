@@ -25,15 +25,7 @@ const allFiles = readdirSync(dir, { recursive: true, encoding: "utf-8" })
 const files = integrationOnly ? allFiles.filter((f) => f.includes(".integration.")) : allFiles;
 
 if (files.length === 0) {
-  // No integration tests exist yet (none are committed). A `--integration`
-  // run with zero matches is the expected state, not a failure -- no-op
-  // cleanly so the script can stay wired up for when they land. A plain
-  // unit run finding zero files IS a broken build, so that stays fatal.
-  if (integrationOnly) {
-    console.log("No integration test files found (--integration filter) -- nothing to run.");
-    process.exit(0);
-  }
-  console.error(`No test files found in ${dir}`);
+  console.error(`No test files found in ${dir}${integrationOnly ? " (--integration filter)" : ""}`);
   process.exit(1);
 }
 
