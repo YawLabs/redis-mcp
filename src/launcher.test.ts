@@ -207,11 +207,31 @@ describe("launcher netGrant()", () => {
     assert.deepEqual(netGrant("6391"), { flag: "--allow-net=localhost:6391", open: null });
   });
 
+  it("reads a bare port the way ioredis's isInt does: whitespace, a sign, or a .0 are still that port", () => {
+    // A trailing newline or space on an env value is the realistic shape (a
+    // .env line ending, `set X=6391 ` in a batch file). Each used to fall
+    // through to the URL branch and pin a wrong host, which oam denied.
+    for (const dsn of ["6391 ", "6391\n", "\t6391", "+6391", "6391.0", "06391"]) {
+      assert.deepEqual(netGrant(dsn), { flag: "--allow-net=localhost:6391", open: null }, JSON.stringify(dsn));
+    }
+  });
+
   it("takes a host or port from the query string when the URL itself names none, as ioredis does", () => {
     assert.deepEqual(netGrant("redis://127.0.0.1?port=6391"), { flag: "--allow-net=127.0.0.1:6391", open: null });
     assert.deepEqual(netGrant("redis:///0?host=cache&port=7000"), { flag: "--allow-net=cache:7000", open: null });
     // The URL's own port wins over the query, as it does in ioredis.
     assert.deepEqual(netGrant("redis://h:6379?port=1"), { flag: "--allow-net=h:6379", open: null });
+    // A repeated key is its last value, as in ioredis.
+    assert.deepEqual(netGrant("redis://h?port=1&port=2"), { flag: "--allow-net=h:2", open: null });
+    // ioredis strips brackets from the URL's host only; a query host is verbatim.
+    assert.deepEqual(netGrant("redis://?host=[::1]&port=6391"), { flag: "--allow-net=[::1]:6391", open: null });
+    // The port is read with parseInt, so a leading zero is not part of it.
+    assert.deepEqual(netGrant("redis://h?port=06391"), { flag: "--allow-net=h:6391", open: null });
+  });
+
+  it("pins localhost when a URL names no host, which is where ioredis dials", () => {
+    assert.deepEqual(netGrant("redis:///0"), { flag: "--allow-net=localhost:6379", open: null });
+    assert.deepEqual(netGrant("redis://?port=6391"), { flag: "--allow-net=localhost:6391", open: null });
   });
 
   it("leaves the grant open, with a reason that never repeats the URL, when it cannot be pinned", () => {
@@ -219,26 +239,31 @@ describe("launcher netGrant()", () => {
       [undefined, /not set/],
       ["", /not set/],
       ["  ", /not set/],
-      ["redis:///0", /names no host/],
-      ["/tmp/redis.sock", /names no host/],
+      ["/tmp/redis.sock", /unix socket path/],
+      // A pathname on a scheme-less DSN is a socket path to ioredis, not a db.
+      ["127.0.0.1:6391/2", /unix socket path/],
       ["redis://[::1", /not a URL this launcher can parse/],
       ["redis://hunter2:[::1", /not a URL this launcher can parse/],
+      // ioredis would dial port NaN, -6391 or 70000 and fail on its own.
+      ["redis://h?port=abc", /port that is not a number from 0 to 65535/],
+      ["-6391", /port that is not a number from 0 to 65535/],
+      ["redis://?port=70000", /port that is not a number from 0 to 65535/],
     ];
     for (const [dsn, reason] of cases) {
       const grant = netGrant(dsn);
       assert.equal(grant.flag, "--allow-net", JSON.stringify(dsn));
       assert.match(grant.open ?? "", reason, JSON.stringify(dsn));
-      assert.doesNotMatch(grant.open ?? "", /hunter2|::1|redis\.sock/, "the reason must not echo the URL");
+      assert.doesNotMatch(grant.open ?? "", /hunter2|::1|redis\.sock|6391|70000/, "the reason must not echo the URL");
     }
   });
 
   it("grants exactly the host and port ioredis dials", () => {
     // The two sides parse REDIS_URL independently; this is what keeps them from
     // drifting. The expectation comes from a real client's resolved options --
-    // its defaults included, so a default that moves is caught too -- with
-    // lazyConnect, so nothing is dialled. A grant host that differs from
-    // ioredis's by one character (a bracket) is a sandbox that denies every
-    // connection.
+    // its defaults and its parseInt of the port included, so a default that
+    // moves is caught too -- with lazyConnect, so nothing is dialled. A grant
+    // host that differs from ioredis's by one character (a bracket) is a
+    // sandbox that denies every connection.
     for (const dsn of [
       "redis://[::1]:6391",
       "rediss://[2001:db8::1]",
@@ -246,16 +271,36 @@ describe("launcher netGrant()", () => {
       "redis://[0:0:0:0:0:0:0:1]:6391",
       "redis://localhost",
       "redis://:pw@10.0.0.5:6380/1",
+      "REDIS://H:6391",
+      "redis://h:",
+      "redis://h:06391",
       "redis://127.0.0.1?port=6391",
       "redis:///2?host=cache&port=7000",
+      "redis://?host=[::1]&port=6391",
+      "redis://?host=a&host=b",
+      "redis://h?port=1&port=2",
+      "redis://h?port=06391",
+      "redis:///0",
+      "redis://?port=6391",
       "127.0.0.1:6379",
       ":hunter2@127.0.0.1:6379",
       "cache.internal",
+      "127.0.0.1:6391\n",
       "6391",
+      "6391 ",
+      "6391\n",
+      "+6391",
+      "6391.0",
+      "06391",
     ]) {
       const client = new Redis(dsn, { lazyConnect: true });
       try {
-        assert.equal(netGrant(dsn).flag, `--allow-net=${client.options.host}:${client.options.port}`, dsn);
+        assert.equal(client.options.path, undefined, `${JSON.stringify(dsn)} must be a TCP endpoint to ioredis`);
+        assert.equal(
+          netGrant(dsn).flag,
+          `--allow-net=${client.options.host}:${client.options.port}`,
+          JSON.stringify(dsn),
+        );
       } finally {
         client.disconnect();
       }
@@ -311,9 +356,9 @@ function runLauncher(
   // from the launcher rather than echoed back by the child: Node 25 took
   // `--allow-net` for itself, so a child Node no longer rejects the grant as a
   // bad option and prints nothing to read.
-  // Its identifiers are prefixed because every preload piece, extraPreload
-  // included, is concatenated into one module.
-  const spawnMarker = `import spawnRecorderCp from "node:child_process"; import { syncBuiltinESMExports as spawnRecorderSync } from "node:module"; const spawnRecorderReal = spawnRecorderCp.spawn; spawnRecorderCp.spawn = function (file, args, opts) { try { writeSync(2, "LAUNCHER_SPAWN=" + JSON.stringify(args) + String.fromCharCode(10)); } catch {} return spawnRecorderReal.call(this, file, args, opts); }; spawnRecorderSync();`;
+  // Its identifiers are prefixed, and it imports what it uses itself, because
+  // every preload piece, extraPreload included, is concatenated into one module.
+  const spawnMarker = `import { writeSync as spawnRecorderWrite } from "node:fs"; import spawnRecorderCp from "node:child_process"; import { syncBuiltinESMExports as spawnRecorderSync } from "node:module"; const spawnRecorderReal = spawnRecorderCp.spawn; spawnRecorderCp.spawn = function (file, args, opts) { try { spawnRecorderWrite(2, "LAUNCHER_SPAWN=" + JSON.stringify(args) + String.fromCharCode(10)); } catch {} return spawnRecorderReal.call(this, file, args, opts); }; spawnRecorderSync();`;
   const posing =
     hostOam === undefined
       ? ""
@@ -414,22 +459,37 @@ describe("launcher sandbox grant, as passed to the spawned oam", () => {
    * Node the child is Node, which cannot run oam's flags -- that does not
    * matter, the argv is captured before it starts.
    */
-  const spawnedArgv = (stderr: string): string[] | undefined => {
+  const spawnedArgv = (stderr: string): string[] => {
     const line = /^LAUNCHER_SPAWN=(.*?)\r?$/m.exec(stderr)?.[1];
-    return line ? (JSON.parse(line) as string[]) : undefined;
+    assert.ok(
+      line,
+      "no LAUNCHER_SPAWN line: the launcher spawned nothing, or spawned through a path runLauncher's recorder does not wrap (it wraps child_process.spawn only)",
+    );
+    return JSON.parse(line) as string[];
   };
-  const passedGrant = (stderr: string) => spawnedArgv(stderr)?.find((arg) => arg.startsWith("--allow-net"));
+  /**
+   * The one net grant in the process-level flags. Exactly one: oam applies the
+   * LAST `--allow-net` it sees, so a second, bare one appended by a regression
+   * would open the network while the first still read as pinned.
+   */
+  const passedGrant = (stderr: string) => {
+    const argv = spawnedArgv(stderr);
+    const flags = argv.filter((arg) => arg.startsWith("--allow-net"));
+    assert.equal(flags.length, 1, `exactly one --allow-net, oam applies the last one: ${JSON.stringify(argv)}`);
+    return flags[0];
+  };
 
-  it("passes an IPv6 grant without brackets, before `run`", { skip, timeout }, async () => {
+  it("passes an IPv6 grant without brackets, in the process-level flags before `run`", { skip, timeout }, async () => {
     const run = await runLauncher(undefined, { REDIS_MCP_SANDBOX: "1", REDIS_URL: "redis://[::1]:6391" });
     assert.equal(passedGrant(run.stderr), "--allow-net=::1:6391", JSON.stringify(run));
     assert.doesNotMatch(run.stderr, /^redis-mcp: /m, "a pinned grant needs no note");
-    // Process-level flags only count before the `run` subcommand.
-    const argv = spawnedArgv(run.stderr) ?? [];
-    assert.ok(
-      argv.indexOf("--permission") >= 0 && argv.indexOf("--permission") < argv.indexOf("run"),
-      JSON.stringify(argv),
-    );
+    // The whole prefix oam reads before `run`: nothing missing, nothing extra.
+    const argv = spawnedArgv(run.stderr);
+    const prefix = argv.slice(0, argv.indexOf("run"));
+    assert.equal(prefix.length, 3, JSON.stringify(argv));
+    assert.equal(prefix[0], "--permission");
+    assert.equal(prefix[1], "--allow-net=::1:6391");
+    assert.match(prefix[2] ?? "", /^--allow-env=.*\bREDIS_URL\b/);
   });
 
   it("pins a scheme-less REDIS_URL the way ioredis reads it, instead of opening the grant", {
@@ -442,7 +502,7 @@ describe("launcher sandbox grant, as passed to the spawned oam", () => {
   });
 
   it("says so on stderr when the grant has to stay open, without echoing REDIS_URL", { skip, timeout }, async () => {
-    // An unterminated IPv6 literal: nothing parses it, ioredis included.
+    // An unterminated IPv6 literal: WHATWG rejects it, and so does ioredis.
     const run = await runLauncher(undefined, { REDIS_MCP_SANDBOX: "1", REDIS_URL: "redis://:hunter2@[::1" });
     assert.equal(passedGrant(run.stderr), "--allow-net", JSON.stringify(run));
     assert.match(

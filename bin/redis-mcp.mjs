@@ -90,8 +90,9 @@
  * postgres-mcp: the one endpoint it may reach is the one it was pointed at, with
  * host and port both pinned: a grant naming only a host admits every port on a
  * hostname or IPv4 address, and nothing at all on an IPv6 literal. Filesystem
- * and child-process stay denied. When REDIS_URL names no host or does not
- * parse, the grant is left open and the launcher says so.
+ * and child-process stay denied. When REDIS_URL cannot be pinned -- a unix
+ * socket path, a URL nothing can parse, a port that is not one -- the grant is
+ * left open and the launcher says so.
  *
  * Opt-in, not default: a denied environment variable is ABSENT from process.env
  * rather than throwing, so an under-granted REDIS_URL reads as "not configured".
@@ -296,45 +297,76 @@ function runtimePlan({ mode, hostOam, sandbox }) {
  *
  * The grant must name exactly the host and port ioredis dials, because that is
  * what oam formats as the resource it checks (`format!("{host}:{port}")` over
- * the bare address). So this follows ioredis's own `parseURL`
- * (`ioredis/built/utils/index.js`) step for step:
+ * the host string handed to net.connect, port as a number). So the host and
+ * port are resolved here the way ioredis resolves them -- `parseURL` in
+ * `ioredis/built/utils/index.js`, then `Redis.parseOptions` for the defaults
+ * and the port's `parseInt`:
  *
+ *   - a DSN `isInt` accepts (`6391`, but also `6391 `, `+6391`, `6391.0`) is a
+ *     port on ioredis's default host, localhost;
+ *   - a DSN starting with `/` is a unix socket path;
  *   - a scheme-less DSN (`127.0.0.1:6379`, `:pw@host:6379`, `host`) is parsed
- *     as if it began with `redis://`;
- *   - a bare integer (`6391`) is a port on ioredis's default host, localhost;
+ *     as if it began with `redis://`, and a pathname on it (`host:6379/2`) is
+ *     a unix socket path too, not a db number;
  *   - WHATWG `URL#hostname` keeps the brackets on an IPv6 literal (`[::1]`)
- *     and ioredis strips them, so they come off here too. Both sides see the
- *     address already compressed by WHATWG (`[0:0:0:0:0:0:0:1]` becomes
- *     `[::1]`);
- *   - a `host` or `port` in the query string (`redis://h?port=6391`) fills in
- *     whichever the URL itself did not name;
- *   - the port defaults to ioredis's 6379.
+ *     and ioredis strips them, so they come off here too -- from the URL's
+ *     host only; a `host` from the query string is used verbatim. Both sides
+ *     see the address already compressed by WHATWG (`[0:0:0:0:0:0:0:1]`
+ *     becomes `[::1]`);
+ *   - a `host` or `port` in the query string fills in whichever the URL itself
+ *     did not name, and a repeated key resolves to its last value;
+ *   - with no host anywhere (`redis:///0`, `redis://?port=6391`), the host is
+ *     localhost; the port defaults to 6379 and is read with `parseInt`, so
+ *     `06391` is 6391.
  *
  * Measured on oam 0.15.2: `--allow-net=[::1]:6391` denies a connect to ::1
  * port 6391 (`resource: '::1:6391'`); `--allow-net=::1:6391` admits it and
  * still denies ::1 port 63910. There is no host/port ambiguity to resolve in
  * the IPv6 case, because the match is a whole-string comparison, not a parse.
  *
- * What is left -- a DSN with no host even after all of that (`redis:///0`, a
- * unix socket path) or one WHATWG rejects (`redis://[::1`) -- gets a bare
- * `--allow-net` rather than a guessed narrow one, because a wrong narrow grant
- * fails at connect time with a denial that does not name the cause. The caller
- * reports that the sandbox's network is open. `open` never contains the URL:
- * it can carry a password.
+ * What is left gets a bare `--allow-net` rather than a guessed narrow one: a
+ * unix socket path, which is not a network endpoint at all; a DSN WHATWG
+ * rejects (`redis://[::1`), which ioredis rejects the same way; and a port
+ * that is not a number from 0 to 65535, which ioredis fails to dial on its own.
+ * A wrong narrow grant fails at connect time with a denial that does not name
+ * the cause; the open grant lets the server's own error through, and the
+ * caller reports that the sandbox's network is open. `open` never contains
+ * the URL: it can carry a password.
  */
 function netGrant(dsn) {
-  if (!dsn || dsn.trim() === "") return { flag: "--allow-net", open: "REDIS_URL is not set" };
-  if (/^\d+$/.test(dsn)) return { flag: `--allow-net=localhost:${dsn}`, open: null };
+  const open = (reason) => ({ flag: "--allow-net", open: reason });
+  if (!dsn || dsn.trim() === "") return open("REDIS_URL is not set");
+  // ioredis's isInt: anything Number() reads as an integer, whitespace and
+  // sign included, is a port on localhost.
+  const asNumber = Number.parseFloat(dsn);
+  if (!Number.isNaN(Number(dsn)) && (asNumber | 0) === asNumber) {
+    return pinned("localhost", dsn);
+  }
+  if (dsn.startsWith("/")) return open("REDIS_URL names a unix socket path, not a host");
+  const hasScheme = /^rediss?:\/\//i.test(dsn);
   let url;
   try {
-    url = new URL(/^rediss?:\/\//i.test(dsn) ? dsn : `redis://${dsn}`);
+    url = new URL(hasScheme ? dsn : `redis://${dsn}`);
   } catch {
-    return { flag: "--allow-net", open: "REDIS_URL is not a URL this launcher can parse" };
+    return open("REDIS_URL is not a URL this launcher can parse");
   }
-  const host = (url.hostname || url.searchParams.get("host") || "").replace(/^\[|\]$/g, "");
-  if (!host) return { flag: "--allow-net", open: "REDIS_URL names no host" };
-  const port = url.port || url.searchParams.get("port") || 6379;
-  return { flag: `--allow-net=${host}:${port}`, open: null };
+  // Only a scheme-less DSN's pathname is a socket path; on `redis://` it is
+  // the db number.
+  if (!hasScheme && url.pathname && url.pathname !== "/") {
+    return open("REDIS_URL names a unix socket path, not a host");
+  }
+  const host = url.hostname
+    ? url.hostname.replace(/^\[|\]$/g, "")
+    : (url.searchParams.getAll("host").at(-1) || "localhost");
+  return pinned(host, url.port || url.searchParams.getAll("port").at(-1) || "6379");
+
+  function pinned(host, rawPort) {
+    const port = Number.parseInt(rawPort, 10);
+    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+      return open("REDIS_URL names a port that is not a number from 0 to 65535");
+    }
+    return { flag: `--allow-net=${host}:${port}`, open: null };
+  }
 }
 
 /**
