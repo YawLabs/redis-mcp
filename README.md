@@ -132,13 +132,13 @@ Use a `rediss://` URL for TLS. If the provider serves a cert signed by a private
 }
 ```
 
-This disables certificate-chain verification only - the connection is still TLS-encrypted end-to-end. Where you can install the CA, prefer `NODE_EXTRA_CA_CERTS` over disabling verification - but only Node reads that variable. Under oam (see [Runtime](#runtime)) a private CA needs either `REDIS_TLS_REJECT_UNAUTHORIZED=false` or `REDIS_MCP_RUNTIME=node`.
+This disables certificate-chain verification only - the connection is still TLS-encrypted end-to-end. Where you can install the CA, prefer `NODE_EXTRA_CA_CERTS` over disabling verification - but only Node reads that variable ([YawLabs/oam#136](https://github.com/YawLabs/oam/issues/136)). Under oam (see [Runtime](#runtime)) a private CA needs either `REDIS_TLS_REJECT_UNAUTHORIZED=false` or `REDIS_MCP_RUNTIME=node`.
 
 ### Runtime
 
 The published `redis-mcp` command is a small launcher that prefers the newest [oam](https://oamjs.org) JavaScript runtime it can find and falls back to Node. It only uses the latest oam release, currently **0.15.2**, and never serves on an older one. **If you do not have oam, nothing changes:** the fallback is automatic, and because npm has already started Node to run the launcher, it is an in-process `import()` of the server with no extra spawn.
 
-**TLS under oam.** oam's TLS socket lacks some of the `net.Socket` methods ioredis calls ([YawLabs/oam#132](https://github.com/YawLabs/oam/issues/132)); the server supplies them itself, so `rediss://` works on either runtime, sandbox included. The first time that happens the server says so on stderr (`using in-process shims`). What oam does not have is `NODE_EXTRA_CA_CERTS`: for a private CA under oam, use `REDIS_TLS_REJECT_UNAUTHORIZED=false` or `REDIS_MCP_RUNTIME=node`.
+**TLS under oam.** Through oam 0.15.2, oam's TLS socket lacks some of the `net.Socket` methods ioredis calls ([YawLabs/oam#132](https://github.com/YawLabs/oam/issues/132)) and does not close itself when the server hangs up. The server supplies both itself, so `rediss://` works on either runtime, sandbox included, and a dropped idle connection is reconnected. The first time that happens the server says so on stderr (`using in-process shims`); on an oam that has these members (fixed on oam's main branch by [YawLabs/oam#141](https://github.com/YawLabs/oam/pull/141)) nothing is shimmed and nothing is printed. What oam does not have is `NODE_EXTRA_CA_CERTS` ([YawLabs/oam#136](https://github.com/YawLabs/oam/issues/136)): for a private CA under oam, use `REDIS_TLS_REJECT_UNAUTHORIZED=false` or `REDIS_MCP_RUNTIME=node`.
 
 **How the runtime is chosen:**
 

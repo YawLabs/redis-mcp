@@ -80,9 +80,13 @@ server.connect(transport).catch((err: unknown) => {
   process.exit(1);
 });
 
-// Startup banner on stderr - stdio MCP protocol uses stdout, so stderr is free for logs.
+// Startup banner on stderr - stdio MCP protocol uses stdout, so stderr is free
+// for logs. It names the runtime because the launcher can end up on either
+// (see README "Runtime"), and which one is serving is the first question when
+// something runtime-specific, like TLS under oam, goes wrong.
 const writesNote = isWritesAllowed() ? "writes ENABLED" : "read-only";
-console.error(`@yawlabs/redis-mcp v${version} ready (${allTools.length} tools, ${writesNote})`);
+const runtime = process.versions.oam ? `oam ${process.versions.oam}` : `node ${process.versions.node}`;
+console.error(`@yawlabs/redis-mcp v${version} ready (${allTools.length} tools, ${writesNote}) on ${runtime}`);
 
 // Clean shutdown: close the Redis connection when the transport closes.
 const cleanup = async () => {

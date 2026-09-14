@@ -130,6 +130,11 @@ export interface TlsRespServer {
   port: number;
   /** Every command received, in order, across all connections. */
   received: string[][];
+  /**
+   * End every live connection from the server side, the way a managed Redis
+   * drops an idle client, and resolve once each has fully closed here.
+   */
+  dropConnections(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -177,6 +182,16 @@ export function startTlsRespServer(): Promise<TlsRespServer> {
       resolve({
         port: (server.address() as AddressInfo).port,
         received,
+        dropConnections: () =>
+          Promise.all(
+            [...sockets].map(
+              (socket) =>
+                new Promise<void>((closed) => {
+                  socket.once("close", () => closed());
+                  socket.end();
+                }),
+            ),
+          ).then(() => undefined),
         close: () =>
           new Promise((done) => {
             for (const socket of sockets) socket.destroy();
