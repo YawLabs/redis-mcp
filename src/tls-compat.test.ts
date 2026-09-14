@@ -619,6 +619,7 @@ describe(`rediss:// under a real oam${"path" in oam ? ` (${oam.version} at ${oam
       assert.deepEqual(run.results, [PONG], JSON.stringify(run));
       assert.match(run.stderr, servedByOam);
       assert.doesNotMatch(run.stderr, /restricted|ERR_ACCESS_DENIED/);
+      assertShimAnnouncement(t, run.stderr);
       assert.equal(run.code, 0);
     } finally {
       await v6.close();

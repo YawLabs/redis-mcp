@@ -88,9 +88,10 @@
  *
  * The net grant is DERIVED from REDIS_URL at launch, for the same reason as
  * postgres-mcp: the one endpoint it may reach is the one it was pointed at, with
- * host and port both pinned because a grant naming only a host admits every
- * port on it. Filesystem and child-process stay denied. When REDIS_URL names no
- * host or does not parse, the grant is left open and the launcher says so.
+ * host and port both pinned: a grant naming only a host admits every port on a
+ * hostname or IPv4 address, and nothing at all on an IPv6 literal. Filesystem
+ * and child-process stay denied. When REDIS_URL names no host or does not
+ * parse, the grant is left open and the launcher says so.
  *
  * Opt-in, not default: a denied environment variable is ABSENT from process.env
  * rather than throwing, so an under-granted REDIS_URL reads as "not configured".
@@ -287,38 +288,53 @@ function runtimePlan({ mode, hostOam, sandbox }) {
  *
  * Derived, not hardcoded: the only endpoint this server may reach is the one it
  * was configured to reach. oam (0.15.0 and later) matches a socket grant that
- * carries a port exactly against "host:port", and a grant naming only a host
- * admits every port on it -- so pin both, defaulting to ioredis's 6379.
+ * carries a port exactly, as a whole string, against "host:port". Always pin
+ * both: a grant naming only a host admits every port on a hostname or IPv4
+ * address, and admits nothing at all for an unbracketed IPv6 literal, whose
+ * colons oam's host_of() cannot split (measured on 0.15.2: `--allow-net=::1`
+ * denies ::1 port 6391).
  *
- * The host must be spelled the way oam spells the resource it checks, which is
- * the host ioredis dials: `format!("{host}:{port}")` over the bare address. WHATWG
- * `URL#hostname` keeps the brackets on an IPv6 literal (`[::1]`) and ioredis
- * strips them (`ioredis/built/utils/index.js`, `parseURL`), so the brackets come
- * off here too. Measured on oam 0.15.2: `--allow-net=[::1]:6391` denies a
- * connect to ::1 port 6391 (`resource: '::1:6391'`); `--allow-net=::1:6391`
- * admits it and still denies ::1 port 63910. There is no host/port ambiguity to
- * resolve, because the match is a whole-string comparison, not a parse. Both
- * sides also normalise the same way: WHATWG compresses the address
- * (`[0:0:0:0:0:0:0:1]` becomes `[::1]`) before either of them sees it.
+ * The grant must name exactly the host and port ioredis dials, because that is
+ * what oam formats as the resource it checks (`format!("{host}:{port}")` over
+ * the bare address). So this follows ioredis's own `parseURL`
+ * (`ioredis/built/utils/index.js`) step for step:
  *
- * A URL with no host (`redis:///0`) or one WHATWG cannot parse (`127.0.0.1:6379`,
- * with no scheme, which ioredis still accepts) gets a bare `--allow-net` rather
- * than a guessed narrow one, because a wrong narrow grant fails at connect time
- * with a denial that does not name the cause. The caller reports that the
- * sandbox's network is open. `open` never contains the URL: it can carry a
- * password.
+ *   - a scheme-less DSN (`127.0.0.1:6379`, `:pw@host:6379`, `host`) is parsed
+ *     as if it began with `redis://`;
+ *   - a bare integer (`6391`) is a port on ioredis's default host, localhost;
+ *   - WHATWG `URL#hostname` keeps the brackets on an IPv6 literal (`[::1]`)
+ *     and ioredis strips them, so they come off here too. Both sides see the
+ *     address already compressed by WHATWG (`[0:0:0:0:0:0:0:1]` becomes
+ *     `[::1]`);
+ *   - a `host` or `port` in the query string (`redis://h?port=6391`) fills in
+ *     whichever the URL itself did not name;
+ *   - the port defaults to ioredis's 6379.
+ *
+ * Measured on oam 0.15.2: `--allow-net=[::1]:6391` denies a connect to ::1
+ * port 6391 (`resource: '::1:6391'`); `--allow-net=::1:6391` admits it and
+ * still denies ::1 port 63910. There is no host/port ambiguity to resolve in
+ * the IPv6 case, because the match is a whole-string comparison, not a parse.
+ *
+ * What is left -- a DSN with no host even after all of that (`redis:///0`, a
+ * unix socket path) or one WHATWG rejects (`redis://[::1`) -- gets a bare
+ * `--allow-net` rather than a guessed narrow one, because a wrong narrow grant
+ * fails at connect time with a denial that does not name the cause. The caller
+ * reports that the sandbox's network is open. `open` never contains the URL:
+ * it can carry a password.
  */
 function netGrant(dsn) {
-  if (!dsn) return { flag: "--allow-net", open: "REDIS_URL is not set" };
+  if (!dsn || dsn.trim() === "") return { flag: "--allow-net", open: "REDIS_URL is not set" };
+  if (/^\d+$/.test(dsn)) return { flag: `--allow-net=localhost:${dsn}`, open: null };
   let url;
   try {
-    url = new URL(dsn);
+    url = new URL(/^rediss?:\/\//i.test(dsn) ? dsn : `redis://${dsn}`);
   } catch {
     return { flag: "--allow-net", open: "REDIS_URL is not a URL this launcher can parse" };
   }
-  if (!url.hostname) return { flag: "--allow-net", open: "REDIS_URL names no host" };
-  const host = url.hostname.replace(/^\[|\]$/g, "");
-  return { flag: `--allow-net=${host}:${url.port || 6379}`, open: null };
+  const host = (url.hostname || url.searchParams.get("host") || "").replace(/^\[|\]$/g, "");
+  if (!host) return { flag: "--allow-net", open: "REDIS_URL names no host" };
+  const port = url.port || url.searchParams.get("port") || 6379;
+  return { flag: `--allow-net=${host}:${port}`, open: null };
 }
 
 /**
@@ -328,7 +344,7 @@ function netGrant(dsn) {
  * not after it. `oam run --permission file.js` is rejected outright, which is a
  * good failure but only because it is loud -- ordering here is load-bearing.
  *
- * The net grant comes from `netGrant` below.
+ * The net grant comes from `netGrant` above.
  * A denied environment variable is ABSENT from process.env rather than throwing,
  * so the env list below is derived from what the bundle actually reads; trimming
  * it produces silent misbehaviour, not a clear denial.
@@ -338,7 +354,7 @@ function sandboxFlags() {
 
   const netFlag = netGrant(process.env.REDIS_URL).flag;
 
-  const env =["ALLOW_WRITES","DEBUG","REDIS_COMMAND_TIMEOUT_MS","REDIS_CONNECT_TIMEOUT_MS","REDIS_MAX_KEYS","REDIS_MAX_VALUE_BYTES","REDIS_SCAN_COUNT","REDIS_TLS_REJECT_UNAUTHORIZED","REDIS_URL"];
+  const env = ["ALLOW_WRITES","DEBUG","REDIS_COMMAND_TIMEOUT_MS","REDIS_CONNECT_TIMEOUT_MS","REDIS_MAX_KEYS","REDIS_MAX_VALUE_BYTES","REDIS_SCAN_COUNT","REDIS_TLS_REJECT_UNAUTHORIZED","REDIS_URL"];
 
   const flags = ["--permission", netFlag, `--allow-env=${env.join(",")}`];
   return flags;
@@ -652,10 +668,10 @@ if (plan === "in-process") {
     }
     // A sandbox whose network grant silently opened up would be worse than no
     // note at all. Only when the sandbox is actually about to be applied, and
-    // only for a REDIS_URL that is set: an unset one fails in the server with
-    // its own, clearer message.
+    // only for a REDIS_URL that is set: an unset or blank one fails in the
+    // server with its own, clearer message.
     const grant = netGrant(process.env.REDIS_URL);
-    if (sandboxFlags().length > 0 && grant.open && process.env.REDIS_URL) {
+    if (sandboxFlags().length > 0 && grant.open && process.env.REDIS_URL?.trim()) {
       await errSync(
         `redis-mcp: REDIS_MCP_SANDBOX=1, but ${grant.open}, so the sandbox cannot pin its network grant to the Redis endpoint and leaves network access open.\n`,
       );
