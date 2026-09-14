@@ -1,6 +1,6 @@
 {
   "name": "@yawlabs/redis-mcp",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "mcpName": "io.github.YawLabs/redis-mcp",
   "description": "Redis and Valkey MCP server, read-only by default: SCAN key exploration, TTL/memory inspection, slowlog, health, and a DBA advisor.",
   "license": "MIT",

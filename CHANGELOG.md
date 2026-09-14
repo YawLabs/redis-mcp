@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-09-14
+
 ### Changed
 - npm and MCP Registry listing metadata: bugs URL, core keywords, and server.json title/repository/websiteUrl
 - `release.sh` writes a `## [x.y.z]` changelog entry for every release — promoting `[Unreleased]` when it has content, otherwise generating one from the commit subjects since the previous tag — keeps the Keep-a-Changelog link references current when the file has them, and takes the GitHub release notes from that entry instead of from `git log` subjects. Before this, the script never touched `CHANGELOG.md` at all: `[Unreleased]` was promoted by hand when someone remembered and not otherwise (0.4.0 below is backfilled), and every GitHub release page showed raw commit subjects.
