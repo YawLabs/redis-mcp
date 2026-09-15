@@ -1,6 +1,6 @@
 {
   "name": "@yawlabs/redis-mcp",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "mcpName": "io.github.YawLabs/redis-mcp",
   "description": "Redis and Valkey MCP server, read-only by default: SCAN key exploration, TTL/memory inspection, slowlog, health, and a DBA advisor.",
   "license": "MIT",
@@ -47,7 +47,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsc && node build.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc && node build.mjs",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "test": "npm run build && node scripts/run-tests.mjs dist",
