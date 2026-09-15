@@ -79,11 +79,11 @@ describe("launcher runtimePlan()", () => {
     // asking what it was already running on. `auto` and `oam` both have to take
     // the shortcut -- `oam` demands oam, and the host already is one.
     //
-    // 0.15.2 pins the floor as inclusive (it IS the supported release), and
-    // 0.100.0 pins a numeric compare: it sorts BEFORE 0.15.2 as a string, so a
+    // 0.15.3 pins the floor as inclusive (it IS the supported release), and
+    // 0.100.0 pins a numeric compare: it sorts BEFORE 0.15.3 as a string, so a
     // compare over the raw text would treat a newer oam as too old.
     for (const mode of ["auto", "oam"]) {
-      for (const hostOam of ["0.15.2", "0.16.0", "0.100.0", "1.0.0", "0.16.0-dev"]) {
+      for (const hostOam of ["0.15.3", "0.16.0", "0.100.0", "1.0.0", "0.16.0-dev"]) {
         assert.equal(runtimePlan({ mode, hostOam, sandbox: false }), "in-process", `mode=${mode} hostOam=${hostOam}`);
       }
     }
@@ -96,7 +96,7 @@ describe("launcher runtimePlan()", () => {
     // that no other symptom would reveal. (Discovery that then finds no usable
     // oam still falls back under `auto`; see the launcher header.)
     for (const mode of ["auto", "oam"]) {
-      for (const hostOam of ["0.15.2", "1.0.0"]) {
+      for (const hostOam of ["0.15.3", "1.0.0"]) {
         assert.equal(runtimePlan({ mode, hostOam, sandbox: true }), "discover", `mode=${mode} hostOam=${hostOam}`);
       }
     }
@@ -104,11 +104,13 @@ describe("launcher runtimePlan()", () => {
 
   it("never serves in-process on a host oam below the floor", () => {
     // Below the floor the host must hand off. Serving there was the bug: an oam
-    // older than the latest release is not what the server is verified on, and
-    // below 0.15.0 the sandbox's pinned net grant was not exact.
+    // older than the latest release is not what the server is verified on:
+    // through 0.15.2 a rediss:// URL crashed the server on its first command,
+    // and below 0.15.0 the sandbox's pinned net grant was not exact. 0.15.2 is
+    // the boundary, the newest release below the floor.
     for (const mode of ["auto", "oam"]) {
       for (const sandbox of [false, true]) {
-        for (const hostOam of ["0.15.1", "0.9.0", "0.8.2", "0.0.1"]) {
+        for (const hostOam of ["0.15.2", "0.15.1", "0.9.0", "0.8.2", "0.0.1"]) {
           assert.equal(
             runtimePlan({ mode, hostOam, sandbox }),
             "discover",
@@ -132,7 +134,7 @@ describe("launcher runtimePlan()", () => {
   it("runs REDIS_MCP_RUNTIME=node on Node: in-process on a Node host, handed off from any oam host", () => {
     for (const sandbox of [false, true]) {
       assert.equal(runtimePlan({ mode: "node", hostOam: undefined, sandbox }), "in-process", `sandbox=${sandbox}`);
-      for (const hostOam of ["0.8.2", "0.15.2", "1.0.0", "dev"]) {
+      for (const hostOam of ["0.8.2", "0.15.3", "1.0.0", "dev"]) {
         assert.equal(
           runtimePlan({ mode: "node", hostOam, sandbox }),
           "handoff-node",
@@ -148,25 +150,25 @@ describe("launcher pickNewest()", () => {
   const at = (path: string, version: number[] | null): Candidate => ({ path, version });
 
   it("pins the floor to the latest oam release", () => {
-    assert.deepEqual(floor, [0, 15, 2]);
+    assert.deepEqual(floor, [0, 15, 3]);
   });
 
   it("takes the newest usable oam, not the first one found", () => {
     // The bug: discovery stopped at the first binary that existed, so an older
     // copy in an earlier location (the installed dir is searched before PATH)
     // hid a newer one later.
-    const chosen = pickNewest([at("installed", [0, 15, 2]), at("path-a", [0, 16, 0]), at("path-b", [0, 15, 9])]);
+    const chosen = pickNewest([at("installed", [0, 15, 3]), at("path-a", [0, 16, 0]), at("path-b", [0, 15, 9])]);
     assert.equal(chosen?.path, "path-a");
   });
 
   it("compares numerically and keeps search order on a tie", () => {
     assert.equal(pickNewest([at("a", [0, 16, 0]), at("b", [0, 100, 0])])?.path, "b");
-    assert.equal(pickNewest([at("first", [0, 15, 2]), at("second", [0, 15, 2])])?.path, "first");
+    assert.equal(pickNewest([at("first", [0, 15, 3]), at("second", [0, 15, 3])])?.path, "first");
   });
 
   it("skips binaries below the floor or with no readable version", () => {
-    assert.equal(pickNewest([at("old", [0, 9, 0]), at("broken", null), at("good", [0, 15, 2])])?.path, "good");
-    assert.equal(pickNewest([at("old", [0, 15, 1]), at("broken", null)]), null);
+    assert.equal(pickNewest([at("old", [0, 9, 0]), at("broken", null), at("good", [0, 15, 3])])?.path, "good");
+    assert.equal(pickNewest([at("old", [0, 15, 2]), at("broken", null)]), null);
     assert.equal(pickNewest([]), null);
   });
 });
@@ -476,7 +478,7 @@ describe("launcher on an oam host", () => {
   it("serves in-process instead of spawning a nested oam", { skip, timeout }, async () => {
     const envs: Record<string, string>[] = [{}, { REDIS_MCP_RUNTIME: "oam" }];
     for (const extraEnv of envs) {
-      const run = await runLauncher("0.15.2", extraEnv);
+      const run = await runLauncher("0.15.3", extraEnv);
       assert.equal(servedInProcess(run), true, `${JSON.stringify(extraEnv)} -> ${JSON.stringify(run)}`);
       assert.match(run.stderr, /LAUNCHER_ARGV1=.*dist[\\/]index\.js/);
     }
@@ -485,7 +487,7 @@ describe("launcher on an oam host", () => {
   it("still spawns under REDIS_MCP_SANDBOX=1, so --permission is not dropped", { skip, timeout }, async () => {
     // With a REDIS_URL too, so the spawn would carry the derived, pinned net
     // grant -- the part of the sandbox this server's launcher adds.
-    const run = await runLauncher("0.15.2", { REDIS_MCP_SANDBOX: "1", REDIS_URL: "redis://127.0.0.1:1" });
+    const run = await runLauncher("0.15.3", { REDIS_MCP_SANDBOX: "1", REDIS_URL: "redis://127.0.0.1:1" });
     assert.equal(servedInProcess(run), false, `the sandbox must force a spawn, got ${JSON.stringify(run)}`);
     assert.notEqual(run.code, 0);
     // A spawned child failing, not the launcher diagnosing: every launcher
@@ -494,7 +496,7 @@ describe("launcher on an oam host", () => {
   });
 
   it("still discovers when the host oam is below the floor", { skip, timeout }, async () => {
-    const run = await runLauncher("0.15.1");
+    const run = await runLauncher("0.15.2");
     assert.equal(servedInProcess(run), false, `a below-floor host must not shortcut, got ${JSON.stringify(run)}`);
     assert.notEqual(run.code, 0);
     assert.doesNotMatch(run.stderr, /^redis-mcp: /m);
@@ -615,7 +617,7 @@ describe("launcher with no usable oam", () => {
     assert.equal(run.stdout.trim(), PACKAGE_VERSION, "the Node child must still serve");
     assert.match(
       run.stderr,
-      /this process is oam 0\.9\.0, older than 0\.15\.2, and no newer oam was found; running on .*node/,
+      /this process is oam 0\.9\.0, older than 0\.15\.3, and no newer oam was found; running on .*node/,
     );
     // Served by the child, not in the launcher process: argv[1] was never
     // pointed at dist/index.js.
@@ -631,7 +633,7 @@ describe("launcher with no usable oam", () => {
   });
 
   it("hands REDIS_MCP_RUNTIME=node off to Node even on a supported oam host", { skip, timeout }, async () => {
-    const run = await runLauncher("0.15.2", isolated({ REDIS_MCP_RUNTIME: "node" }));
+    const run = await runLauncher("0.15.3", isolated({ REDIS_MCP_RUNTIME: "node" }));
     assert.equal(run.code, 0, JSON.stringify(run));
     assert.equal(run.stdout.trim(), PACKAGE_VERSION);
     assert.match(run.stderr, /LAUNCHER_ARGV1=.*redis-mcp\.mjs/);
@@ -644,20 +646,20 @@ describe("launcher with no usable oam", () => {
     // The documented, unsandboxed fallback: a supported host oam may serve the
     // server itself, so with nothing to spawn it does -- without --permission,
     // and the note says so rather than claiming Node.
-    const run = await runLauncher("0.15.2", isolated({ REDIS_MCP_SANDBOX: "1", REDIS_URL: "redis://127.0.0.1:1" }));
+    const run = await runLauncher("0.15.3", isolated({ REDIS_MCP_SANDBOX: "1", REDIS_URL: "redis://127.0.0.1:1" }));
     assert.equal(servedInProcess(run), true, JSON.stringify(run));
     assert.match(run.stderr, /LAUNCHER_ARGV1=.*dist[\\/]index\.js/);
-    assert.match(run.stderr, /does not exist; serving in-process on this oam 0\.15\.2, without --permission\.$/m);
+    assert.match(run.stderr, /does not exist; serving in-process on this oam 0\.15\.3, without --permission\.$/m);
   });
 
   it("exits instead under REDIS_MCP_SANDBOX=1 with REDIS_MCP_RUNTIME=oam", { skip, timeout }, async () => {
     const run = await runLauncher(
-      "0.15.2",
+      "0.15.3",
       isolated({ REDIS_MCP_SANDBOX: "1", REDIS_MCP_RUNTIME: "oam", REDIS_URL: "redis://127.0.0.1:1" }),
     );
     assert.equal(run.code, 1, JSON.stringify(run));
     assert.equal(run.stdout.trim(), "", "nothing may be served unsandboxed");
-    assert.match(run.stderr, /REDIS_MCP_RUNTIME=oam but no usable oam \(0\.15\.2 or newer\) was found/);
+    assert.match(run.stderr, /REDIS_MCP_RUNTIME=oam but no usable oam \(0\.15\.3 or newer\) was found/);
   });
 
   /**
@@ -701,7 +703,7 @@ describe("launcher with no usable oam", () => {
     // not --version: the server's --version exits before that close event
     // fires, so it passed with the bug present.
     const run = await runLauncher(
-      "0.15.2",
+      "0.15.3",
       isolated({ OAM_BIN: process.execPath, REDIS_MCP_SANDBOX: "1", REDIS_URL: "redis://127.0.0.1:1" }),
       failFirstSpawn,
       true,
@@ -711,7 +713,7 @@ describe("launcher with no usable oam", () => {
     assert.match(run.stderr, /LAUNCHER_ARGV1=.*dist[\\/]index\.js/);
     assert.match(
       run.stderr,
-      /failed to launch oam at .*; serving in-process on this oam 0\.15\.2, without --permission\.$/m,
+      /failed to launch oam at .*; serving in-process on this oam 0\.15\.3, without --permission\.$/m,
     );
   });
 });

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+- **The launcher uses oam 0.15.3 or newer, and the server no longer carries its own TLS socket shim.** oam 0.15.3 is the first release whose `tls.TLSSocket` has the `net.Socket` members ioredis needs and closes itself when the server hangs up ([YawLabs/oam#132](https://github.com/YawLabs/oam/issues/132)), which is what the shim added in 0.4.1 supplied, and it reads `NODE_EXTRA_CA_CERTS` ([YawLabs/oam#136](https://github.com/YawLabs/oam/issues/136)). With the floor at 0.15.3 the shim could never engage, so it is gone: `rediss://` connections are plain ioredis on either runtime. Verified end to end on oam 0.15.3 — the server answers `PING` over `rediss://` on the `oam run` host path, in the default discovery path, inside the sandbox, over IPv6, and again after the server drops the connection. With only an older oam installed, the launcher now runs the server on Node instead (or exits, under `REDIS_MCP_RUNTIME=oam`).
+
+### Documentation
+- **A private CA is now documented through `NODE_EXTRA_CA_CERTS` on both runtimes.** The README recommends trusting the provider's CA over disabling verification, and no longer says `NODE_EXTRA_CA_CERTS` works only on Node; a test verifies the fixture's certificate through that variable alone, with verification on, on Node, under `oam run` and inside the sandbox, against a control that fails without it.
+
+### Fixed
+- **Deleting a test file no longer leaves it running.** `npm run build` compiled into `dist/` without clearing it, so the output of a deleted or renamed source file stayed behind, and `npm test` kept running compiled tests whose source was gone. The build now empties `dist/` first.
+
 ## [0.4.2] — 2026-09-14
 
 ### Fixed

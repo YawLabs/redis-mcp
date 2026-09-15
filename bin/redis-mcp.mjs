@@ -100,9 +100,15 @@
  * The env list is derived from the shipped bundle.
  *
  * MINIMUM OAM VERSION
- * The latest oam release, 0.15.2 -- bump OAM_MIN when oam ships a newer one.
+ * The latest oam release, 0.15.3 -- bump OAM_MIN when oam ships a newer one.
  * Only the current oam is used and verified; an older one is passed over.
- * The floor is not cosmetic. Before 0.9.0 `child_process.execFile` ran its
+ * The floor is not cosmetic. Through 0.15.2 oam's `tls.TLSSocket` lacked the
+ * `net.Socket` members ioredis calls (`setNoDelay`, `setKeepAlive`,
+ * `setTimeout`, `connecting`) and never closed after the server hung up, so a
+ * `rediss://` URL crashed the server on its first command (YawLabs/oam#132,
+ * fixed in #141); it also ignored NODE_EXTRA_CA_CERTS (#136). The server
+ * carried a socket shim for those until the floor reached 0.15.3, which has
+ * both fixes. Before 0.9.0 `child_process.execFile` ran its
  * arguments through a SHELL, `exec` accepted `timeout` and ignored it,
  * `spawnSync` truncated at `maxBuffer` while reporting success, and
  * `stdio: 'inherit'`/`'ignore'` both behaved as `'pipe'`. This server spawns
@@ -132,7 +138,7 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Oldest oam this server is used and verified on. See MINIMUM OAM VERSION above. */
-const OAM_MIN = [0, 15, 2];
+const OAM_MIN = [0, 15, 3];
 
 /**
  * Bound on each `oam --version` probe. A healthy oam answers in milliseconds;
@@ -293,8 +299,8 @@ function runtimePlan({ mode, hostOam, sandbox }) {
  * carries a port exactly, as a whole string, against "host:port". Always pin
  * both: a grant naming only a host admits every port on a hostname or IPv4
  * address, and admits nothing at all for an unbracketed IPv6 literal, whose
- * colons oam's host_of() cannot split (measured on 0.15.2: `--allow-net=::1`
- * denies ::1 port 6391).
+ * colons oam's host_of() cannot split (measured on 0.15.2 and 0.15.3:
+ * `--allow-net=::1` denies ::1 port 6391).
  *
  * The grant must name exactly the host and port ioredis dials, because that is
  * what oam formats as the resource it checks (`format!("{host}:{port}")` over
@@ -323,10 +329,11 @@ function runtimePlan({ mode, hostOam, sandbox }) {
  *     localhost; the port defaults to 6379 and is read with `parseInt`, so
  *     `06391` is 6391.
  *
- * Measured on oam 0.15.2: `--allow-net=[::1]:6391` denies a connect to ::1
- * port 6391 (`resource: '::1:6391'`); `--allow-net=::1:6391` admits it and
- * still denies ::1 port 63910. There is no host/port ambiguity to resolve in
- * the IPv6 case, because the match is a whole-string comparison, not a parse.
+ * Measured on oam 0.15.2 and 0.15.3: `--allow-net=[::1]:6391` denies a
+ * connect to ::1 port 6391 (`resource: '::1:6391'`); `--allow-net=::1:6391`
+ * admits it and still denies ::1 port 63910. There is no host/port ambiguity
+ * to resolve in the IPv6 case, because the match is a whole-string comparison,
+ * not a parse.
  *
  * What is left gets a bare `--allow-net` rather than a guessed narrow one, and
  * the caller reports that the sandbox's network is open:
@@ -340,9 +347,9 @@ function runtimePlan({ mode, hostOam, sandbox }) {
  *     grant for every port on `a` -- a silent widening, where an open grant at
  *     least says so;
  *   - a port that is not a number from 1 to 65535 (`?port=`, `:0`, `70000`).
- *     Node refuses to dial one; oam 0.15.2 does not refuse, it clamps --
- *     70000 dials 65535, and a TLS port 0 dials 443 -- so there is no port the
- *     user named that a grant could honestly pin.
+ *     Node refuses to dial one; oam (0.15.2 and 0.15.3) does not refuse, it
+ *     clamps -- 70000 dials 65535, and a TLS port 0 dials 443 -- so there is
+ *     no port the user named that a grant could honestly pin.
  *
  * A wrong narrow grant fails at connect time with a denial that does not name
  * the cause; the open grant lets the server's own error through. `open` never

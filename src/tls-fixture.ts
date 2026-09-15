@@ -5,7 +5,7 @@
  * without a Redis binary, a certificate on disk, or openssl.
  *
  * NOTE: no `.test.` in this file's name, so the runner (scripts/run-tests.mjs)
- * never executes it directly; the tls-compat tests import it.
+ * never executes it directly; the TLS tests import it.
  */
 
 import { generateKeyPairSync, sign } from "node:crypto";
@@ -128,6 +128,12 @@ function takeCommands(buf: string): { commands: string[][]; rest: string } {
 
 export interface TlsRespServer {
   port: number;
+  /**
+   * The server's self-signed certificate, PEM. It is its own issuer, so a
+   * client trusts the server by trusting this (as `ca`, or through
+   * NODE_EXTRA_CA_CERTS).
+   */
+  cert: string;
   /** Every command received, in order, across all connections. */
   received: string[][];
   /**
@@ -183,6 +189,7 @@ export function startTlsRespServer(host = "127.0.0.1"): Promise<TlsRespServer> {
     server.listen(0, host, () => {
       resolve({
         port: (server.address() as AddressInfo).port,
+        cert,
         received,
         dropConnections: () =>
           Promise.all(
