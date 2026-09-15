@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   formatRedisError,
+  getClient,
   getCommandTimeoutMs,
   getConnectTimeoutMs,
   getMaxKeys,
@@ -9,6 +13,11 @@ import {
   getScanCount,
   getTlsConfig,
   isWritesAllowed,
+  OAM_TLS_MIN,
+  runCommand,
+  shutdown,
+  tlsRuntimeProblem,
+  wouldUseTls,
 } from "./api.js";
 
 describe("isWritesAllowed", () => {
@@ -278,5 +287,110 @@ describe("formatRedisError", () => {
   it("stringifies non-Error values", () => {
     assert.equal(formatRedisError("boom"), "boom");
     assert.equal(formatRedisError(42), "42");
+  });
+});
+
+describe("TLS on an oam too old to carry it", () => {
+  const KEYS = ["REDIS_URL", "REDIS_TLS_REJECT_UNAUTHORIZED"];
+  let saved: Record<string, string | undefined> = {};
+  beforeEach(async () => {
+    saved = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
+    await shutdown();
+  });
+  afterEach(async () => {
+    await shutdown();
+    delete (process.versions as Record<string, string>).oam;
+    for (const key of KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+  /** Make this Node process report `process.versions.oam`, as an oam host does. */
+  const poseAsOam = (version: string) =>
+    Object.defineProperty(process.versions, "oam", { value: version, configurable: true, enumerable: true });
+
+  it("keeps its floor equal to the launcher's", () => {
+    // The launcher refuses an oam below OAM_MIN; the server refuses TLS below
+    // OAM_TLS_MIN for hosts that skip the launcher. One number, two places.
+    const launcher = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "redis-mcp.mjs"),
+      "utf-8",
+    );
+    const floor = /const OAM_MIN = \[([^\]]*)\];/
+      .exec(launcher)?.[1]
+      ?.split(",")
+      .map((n) => Number(n.trim()));
+    assert.deepEqual(floor, [...OAM_TLS_MIN]);
+  });
+
+  it("names the problem below the floor, and nothing at or above it, on Node, or on an unreadable version", () => {
+    for (const version of ["0.15.2", "0.15.0", "0.9.0", "0.0.1"]) {
+      const problem = tlsRuntimeProblem(version);
+      assert.match(
+        problem ?? "",
+        new RegExp(`needs oam ${OAM_TLS_MIN.join("\\.")} or newer.*running on oam ${version.replace(/\./g, "\\.")}`),
+      );
+      assert.match(problem ?? "", /oamjs\.org/);
+    }
+    // 0.100.0 sorts before 0.15.3 as a string; the compare must be numeric.
+    for (const version of ["0.15.3", "0.15.10", "0.16.0", "0.100.0", "1.0.0", "0.15.3-dev"]) {
+      assert.equal(tlsRuntimeProblem(version), null, version);
+    }
+    assert.equal(tlsRuntimeProblem(undefined), null, "Node");
+    assert.equal(tlsRuntimeProblem("dev"), null, "an unreadable version is not refused");
+  });
+
+  it("makes a rediss:// tool call on an old oam return that error instead of crashing, and builds no client", async () => {
+    poseAsOam("0.15.2");
+    process.env.REDIS_URL = "rediss://127.0.0.1:1";
+    const reply = await runCommand("PING", []);
+    assert.equal(reply.ok, false);
+    assert.match(reply.error ?? "", /needs oam 0\.15\.3 or newer, and this server is running on oam 0\.15\.2/);
+    // Refused before anything was cached, so an updated runtime is picked up.
+    assert.throws(() => getClient(), /needs oam 0\.15\.3/);
+  });
+
+  it("refuses TLS turned on by REDIS_TLS_REJECT_UNAUTHORIZED too, and leaves plain redis:// alone", async () => {
+    poseAsOam("0.15.2");
+    process.env.REDIS_URL = "redis://127.0.0.1:1";
+    process.env.REDIS_TLS_REJECT_UNAUTHORIZED = "false";
+    assert.throws(() => getClient(), /needs oam 0\.15\.3/);
+    await shutdown();
+    delete process.env.REDIS_TLS_REJECT_UNAUTHORIZED;
+    assert.doesNotThrow(() => getClient());
+  });
+
+  it("lets TLS through on an oam at the floor", () => {
+    poseAsOam("0.15.3");
+    process.env.REDIS_URL = "rediss://127.0.0.1:1";
+    assert.doesNotThrow(() => getClient());
+  });
+
+  it("predicts TLS exactly as the built client decides it", async () => {
+    // wouldUseTls feeds the startup warning; getClient decides from the client.
+    // They must agree, or the warning lies.
+    const cases: [string, string | undefined][] = [
+      ["rediss://127.0.0.1:1", undefined],
+      ["redis://127.0.0.1:1", undefined],
+      ["REDISS://127.0.0.1:1", undefined],
+      ["redis://127.0.0.1:1", "false"],
+      ["redis://127.0.0.1:1", "true"],
+      ["redis://127.0.0.1:1", "yes"],
+      ["rediss://127.0.0.1:1", "0"],
+      ["127.0.0.1:1", undefined],
+    ];
+    const original = console.error;
+    console.error = () => {};
+    try {
+      for (const [url, reject] of cases) {
+        await shutdown();
+        process.env.REDIS_URL = url;
+        if (reject === undefined) delete process.env.REDIS_TLS_REJECT_UNAUTHORIZED;
+        else process.env.REDIS_TLS_REJECT_UNAUTHORIZED = reject;
+        assert.equal(wouldUseTls(), Boolean(getClient().options.tls), `${url} REDIS_TLS_REJECT_UNAUTHORIZED=${reject}`);
+      }
+    } finally {
+      console.error = original;
+    }
   });
 });

@@ -29,9 +29,11 @@
  *                                        before windowing it with GETRANGE (default:
  *                                        262144 = 256 KiB). Keeps a multi-MB string from
  *                                        flooding the model context; sets `truncated`.
- *   - REDIS_TLS_REJECT_UNAUTHORIZED    - "false" to disable TLS cert verification (for
- *                                        managed Redis using private-CA certs). The
- *                                        connection is still encrypted.
+ *   - REDIS_TLS_REJECT_UNAUTHORIZED    - "false" to disable TLS cert verification --
+ *                                        the chain AND the hostname check. The
+ *                                        connection is still encrypted, but no longer
+ *                                        authenticated; for a private CA, prefer
+ *                                        NODE_EXTRA_CA_CERTS.
  *
  * Safety model:
  *   The server issues a read-only command allowlist by default (see
@@ -150,11 +152,18 @@ export function isWritesAllowed(): boolean {
   return v === "1" || v === "true";
 }
 
+/** REDIS_TLS_REJECT_UNAUTHORIZED as a `tls` option, without warning about a typo. */
+function parseTlsEnv(raw: string | undefined): { rejectUnauthorized: boolean } | undefined {
+  if (raw === "0" || raw === "false") return { rejectUnauthorized: false };
+  if (raw === "1" || raw === "true") return { rejectUnauthorized: true };
+  return undefined;
+}
+
 export function getTlsConfig(): { rejectUnauthorized: boolean } | undefined {
   const raw = process.env.REDIS_TLS_REJECT_UNAUTHORIZED;
   if (raw === undefined) return undefined;
-  if (raw === "0" || raw === "false") return { rejectUnauthorized: false };
-  if (raw === "1" || raw === "true") return { rejectUnauthorized: true };
+  const parsed = parseTlsEnv(raw);
+  if (parsed) return parsed;
   // Env var IS set but doesn't match a recognized form (e.g. `Flase`, `yes`,
   // empty string). Returning undefined here would silently fall through to
   // ioredis's default behavior, which is indistinguishable from "env var
@@ -165,6 +174,55 @@ export function getTlsConfig(): { rejectUnauthorized: boolean } | undefined {
     `[redis-mcp] REDIS_TLS_REJECT_UNAUTHORIZED=${JSON.stringify(raw)} not recognized; expected "0", "false", "1", or "true". Deferring to the ioredis / connection-string default.`,
   );
   return undefined;
+}
+
+/**
+ * The oldest oam whose TLS socket ioredis can use. Through 0.15.2 oam's
+ * `tls.TLSSocket` lacked `setNoDelay`, `setKeepAlive`, `setTimeout` and
+ * `connecting`, and never closed after the server hung up (YawLabs/oam#132), so
+ * the first command over TLS threw an uncaught TypeError and killed the
+ * process.
+ *
+ * The launcher (bin/redis-mcp.mjs) never serves on an oam below its OAM_MIN,
+ * which is this same version -- a test keeps the two equal. But a host can run
+ * dist/index.js directly under oam and skip the launcher entirely, so the
+ * server checks for itself before it opens a TLS connection.
+ */
+export const OAM_TLS_MIN = [0, 15, 3] as const;
+
+/**
+ * Why this runtime cannot serve TLS, or null when it can. Null on Node, on an
+ * oam at or above OAM_TLS_MIN, and on an oam version this cannot read: a
+ * refusal there would block a build that may well work, while letting it
+ * through risks no more than the crash this check exists to explain.
+ */
+export function tlsRuntimeProblem(oamVersion: string | undefined = process.versions.oam): string | null {
+  if (oamVersion === undefined) return null;
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(oamVersion);
+  if (!match) return null;
+  const [major, minor, patch] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const [minMajor, minMinor, minPatch] = OAM_TLS_MIN;
+  const atOrAbove = major !== minMajor ? major > minMajor : minor !== minMinor ? minor > minMinor : patch >= minPatch;
+  if (atOrAbove) return null;
+  return (
+    `TLS (rediss://) needs oam ${OAM_TLS_MIN.join(".")} or newer, and this server is running on oam ${oamVersion}, ` +
+    "whose TLS socket crashes the Redis client (YawLabs/oam#132). Update oam (https://oamjs.org), " +
+    "or run the server on Node -- the redis-mcp launcher does that for you."
+  );
+}
+
+/**
+ * Whether the client getClient() builds will use TLS, read the way ioredis
+ * reads it: a URL that starts with `rediss://` (case-sensitive, as ioredis
+ * checks it), or a `tls` option, which this server passes whenever
+ * REDIS_TLS_REJECT_UNAUTHORIZED holds a recognized value. For the startup
+ * warning; getClient() itself checks the built client's options.
+ */
+export function wouldUseTls(): boolean {
+  return (
+    (process.env.REDIS_URL ?? "").startsWith("rediss://") ||
+    parseTlsEnv(process.env.REDIS_TLS_REJECT_UNAUTHORIZED) !== undefined
+  );
 }
 
 /**
@@ -190,7 +248,7 @@ export function getClient(): Redis {
   // maxRetriesPerRequest=0 means a failed command rejects immediately instead
   // of being queued and silently retried -- an MCP tool call should fail fast
   // with a readable error, not hang while ioredis retries in the background.
-  client = new Redis(url, {
+  const created = new Redis(url, {
     lazyConnect: true,
     connectTimeout: getConnectTimeoutMs(),
     commandTimeout: getCommandTimeoutMs(),
@@ -205,6 +263,15 @@ export function getClient(): Redis {
     retryStrategy: (times) => (times > 3 ? null : 200 * 2 ** (times - 1)),
     ...(tls ? { tls: { rejectUnauthorized: tls.rejectUnauthorized } } : {}),
   });
+  // Refuse TLS on an oam that cannot carry it, before anything is dialled
+  // (lazyConnect), as an error the tool call returns rather than a crash. The
+  // client is not cached, so an updated runtime is picked up on restart.
+  const problem = created.options.tls ? tlsRuntimeProblem() : null;
+  if (problem) {
+    created.disconnect();
+    throw new Error(problem);
+  }
+  client = created;
   // ioredis emits 'error' for connection-level failures. Log to stderr so the
   // stdio MCP protocol channel (stdout) stays clean. Without a listener,
   // ioredis throws unhandled 'error' events that can crash the process.

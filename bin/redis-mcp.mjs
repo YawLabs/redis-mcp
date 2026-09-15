@@ -22,6 +22,10 @@
  *
  * For an MCP host config, point straight at oam and skip this file:
  *   { "command": "oam", "args": ["run", "<abs>/dist/index.js"] }
+ * That also skips the version floor below, so it is on the host to run an oam
+ * at or above it. The server checks the one thing an older oam breaks outright:
+ * over TLS on an oam below 0.15.3, every tool call returns an error naming the
+ * version to update to, instead of the process crashing.
  *
  * WHICH OAM
  * OAM_BIN, when set and usable, is used as given. Otherwise every oam binary
@@ -73,13 +77,16 @@
  * over -- an unusable OAM_BIN (named even when discovery then finds a usable
  * oam), and, only when no usable oam was found, each oam that was too old or
  * would not run and any Windows oam.cmd/.bat shim -- when the chosen oam
- * failed to launch, and whenever a host oam below the floor hands off to Node.
- * With no oam found at all, on a Node host or a supported oam host, the
- * fallback is silent. Only the note from a supported oam host says "without
- * --permission"; the rest, the below-floor handoff note included, do not
- * mention the dropped sandbox. REDIS_MCP_RUNTIME=oam turns every one of those
- * fallbacks into a hard exit instead, so set it alongside REDIS_MCP_SANDBOX=1
- * when an unsandboxed server is not acceptable.
+ * failed to launch, whenever a host oam below the floor hands off to Node, and
+ * whenever REDIS_MCP_SANDBOX=1 was asked for. Every note under
+ * REDIS_MCP_SANDBOX=1 says the sandbox was not applied, and a note that passed
+ * over a working oam that is only too old says to update it. A below-floor
+ * host's handoff is one message, written once the launcher knows whether a
+ * Node was found, so it never announces a fallback that then does not happen.
+ * With no oam found at all and no sandbox asked for, on a Node host or a
+ * supported oam host, the fallback is silent. REDIS_MCP_RUNTIME=oam turns every
+ * one of those fallbacks into a hard exit instead, so set it alongside
+ * REDIS_MCP_SANDBOX=1 when an unsandboxed server is not acceptable.
  *
  * THE `--permission` SANDBOX (opt-in)
  * `REDIS_MCP_SANDBOX=1` runs a spawned oam under its permission model. It
@@ -108,7 +115,8 @@
  * `rediss://` URL crashed the server on its first command (YawLabs/oam#132,
  * fixed in #141); it also ignored NODE_EXTRA_CA_CERTS (#136). The server
  * carried a socket shim for those until the floor reached 0.15.3, which has
- * both fixes. Before 0.9.0 `child_process.execFile` ran its
+ * both fixes; it now refuses TLS on an older oam itself, for the hosts that run
+ * dist/index.js without this launcher. Before 0.9.0 `child_process.execFile` ran its
  * arguments through a SHELL, `exec` accepted `timeout` and ignored it,
  * `spawnSync` truncated at `maxBuffer` while reporting success, and
  * `stdio: 'inherit'`/`'ignore'` both behaved as `'pipe'`. This server spawns
@@ -486,18 +494,23 @@ function unusableReason(path, version, label = path) {
  * Choose the oam to spawn: a usable OAM_BIN, else the newest usable discovered
  * binary. Returns the choice (or null) plus stderr notes: `overrideNote` about
  * an unusable OAM_BIN, and `skipped` describing what was found and rejected
- * when nothing was usable.
+ * when nothing was usable. `outdated` is true when anything rejected was a
+ * working oam that is merely below the floor -- the case an update fixes.
  */
 function chooseOam() {
   const override = process.env.OAM_BIN;
   let overrideNote = null;
+  let outdated = false;
   if (override) {
     if (!existsSync(override)) {
       overrideNote = `OAM_BIN=${override} does not exist`;
     } else {
       const version = oamVersion(override);
-      if (atLeast(version, OAM_MIN)) return { chosen: { path: override, version }, overrideNote, skipped: [] };
+      if (atLeast(version, OAM_MIN)) {
+        return { chosen: { path: override, version }, overrideNote, skipped: [], outdated };
+      }
       overrideNote = unusableReason(override, version, `OAM_BIN=${override}`);
+      outdated ||= version !== null;
     }
   }
   const overrideKey = override ? pathKey(override) : null;
@@ -506,7 +519,8 @@ function chooseOam() {
     .map((path) => ({ path, version: oamVersion(path) }));
   const chosen = pickNewest(candidates);
   const skipped = chosen ? [] : candidates.map((c) => unusableReason(c.path, c.version));
-  return { chosen, overrideNote, skipped };
+  if (!chosen) outdated ||= candidates.some((c) => c.version !== null);
+  return { chosen, overrideNote, skipped, outdated };
 }
 
 /** Run the server in THIS process. The zero-overhead fallback. */
@@ -662,7 +676,7 @@ async function launchChild(cmd, args, onLaunchFailed) {
  * one below the floor, or any oam under REDIS_MCP_RUNTIME=node -- so there is
  * no in-process option left.
  */
-async function handOffToNode(reason) {
+async function handOffToNode(reason, remedy = "") {
   const node = findNodeOnPath();
   if (!node) {
     await errSync(
@@ -671,7 +685,7 @@ async function handOffToNode(reason) {
     );
     process.exit(1);
   }
-  if (reason) await errSync(`redis-mcp: ${reason}; running on ${node} instead.\n`);
+  if (reason) await errSync(`redis-mcp: ${reason}; running on ${node} instead${remedy ? `; ${remedy}` : ""}.\n`);
   await launchChild(node, [SERVER_ENTRY, ...process.argv.slice(2)], async (err) => {
     await errSync(`redis-mcp: failed to launch Node at ${node} (${err?.message ?? err})\n`);
     process.exit(1);
@@ -686,24 +700,41 @@ function hostOamServes(hostOam) {
   return hostOam !== undefined && atLeast(parseVersion(hostOam), OAM_MIN);
 }
 
-/** What an `auto` fallback does, for stderr. */
+/**
+ * What an `auto` fallback does, for stderr, or null when THIS process is an
+ * oam below the floor: that fallback is a handoff to Node on PATH, which may
+ * not exist, so handOffToNode reports what actually happened instead of this
+ * note promising it. No fallback applies the sandbox, and every note says so
+ * when it was asked for.
+ */
 function fallbackAction(hostOam) {
-  return hostOamServes(hostOam)
-    ? `serving in-process on this oam ${hostOam}, without --permission`
-    : "using Node instead";
+  if (hostOamServes(hostOam)) return `serving in-process on this oam ${hostOam}, without --permission`;
+  if (hostOam !== undefined) return null;
+  return sandboxFlags().length > 0 ? "using Node instead, without --permission" : "using Node instead";
 }
+
+/** A note, with the fallback action appended when there is one. */
+function withAction(note, hostOam) {
+  const action = fallbackAction(hostOam);
+  return action ? `${note}; ${action}` : note;
+}
+
+/** The remedy for a working oam that is only too old, for stderr. */
+const UPDATE_OAM = `update oam from https://oamjs.org to use it (${OAM_MIN.join(".")} or newer)`;
 
 /**
  * No usable oam, under a mode that allows falling back: in THIS process on a
  * Node host or a supported oam host, handed off to Node from a host oam below
- * the floor. None of them applies the sandbox.
+ * the floor. None of them applies the sandbox. `why` leads the handoff's own
+ * message, which is the only one printed on that path.
  */
-async function fallBack(hostOam) {
+async function fallBack(hostOam, why = "no newer oam was found") {
   if (hostOam === undefined || hostOamServes(hostOam)) {
     await runInProcess();
     return;
   }
-  await handOffToNode(`this process is oam ${hostOam}, older than ${OAM_MIN.join(".")}, and no newer oam was found`);
+  const sandbox = sandboxFlags().length > 0 ? " (REDIS_MCP_SANDBOX=1 is not applied on Node)" : "";
+  await handOffToNode(`this process is oam ${hostOam}, older than ${OAM_MIN.join(".")}, and ${why}${sandbox}`, UPDATE_OAM);
 }
 
 const mode = (process.env.REDIS_MCP_RUNTIME ?? "auto").toLowerCase();
@@ -720,7 +751,7 @@ if (plan === "in-process") {
   const belowFloor = !atLeast(parseVersion(hostOam), OAM_MIN);
   await handOffToNode(belowFloor ? `this process is oam ${hostOam}, older than ${OAM_MIN.join(".")}` : "");
 } else {
-  const { chosen, overrideNote, skipped } = chooseOam();
+  const { chosen, overrideNote, skipped, outdated } = chooseOam();
 
   if (chosen) {
     if (overrideNote) {
@@ -747,10 +778,8 @@ if (plan === "in-process") {
           await errSync(`redis-mcp: failed to launch oam at ${chosen.path} (${err?.message ?? err})\n`);
           process.exit(1);
         }
-        await errSync(
-          `redis-mcp: failed to launch oam at ${chosen.path} (${err?.message ?? err}); ${fallbackAction(hostOam)}.\n`,
-        );
-        await fallBack(hostOam);
+        await errSync(`redis-mcp: ${withAction(`failed to launch oam at ${chosen.path} (${err?.message ?? err})`, hostOam)}.\n`);
+        await fallBack(hostOam, `the newer oam at ${chosen.path} could not be launched`);
       },
     );
   } else {
@@ -771,8 +800,22 @@ if (plan === "in-process") {
       process.exit(1);
     }
     // auto: falling back is correct, but silence is how someone never learns
-    // their OAM_BIN is wrong or their oam is too old to use.
-    if (notes.length > 0) await errSync(`redis-mcp: ${notes.join("; ")}; ${fallbackAction(hostOam)}.\n`);
-    await fallBack(hostOam).catch(fallbackFailed);
+    // their OAM_BIN is wrong, their oam is too old to use, or their sandbox
+    // was not applied.
+    if (hostOam !== undefined && !hostOamServes(hostOam)) {
+      // An oam below the floor hands off to Node, and handOffToNode is the one
+      // message: it knows whether a Node was found, so nothing printed first
+      // can promise a fallback that then does not happen.
+      const found = notes.length > 0 ? ` (${notes.join("; ")})` : "";
+      await fallBack(hostOam, `no newer oam was found${found}`).catch(fallbackFailed);
+    } else {
+      const sandboxed = sandboxFlags().length > 0;
+      if (notes.length > 0 || sandboxed) {
+        const lead = notes.length > 0 ? notes.join("; ") : `REDIS_MCP_SANDBOX=1, but no oam ${OAM_MIN.join(".")} or newer was found`;
+        const remedy = outdated ? `; ${UPDATE_OAM}` : "";
+        await errSync(`redis-mcp: ${withAction(lead, hostOam)}${remedy}.\n`);
+      }
+      await fallBack(hostOam).catch(fallbackFailed);
+    }
   }
 }

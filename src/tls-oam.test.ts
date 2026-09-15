@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { type AddressInfo, createServer, type Socket } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -16,32 +17,83 @@ const DIST_BIN = resolve(REPO_ROOT, "dist", "index.js");
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const PONG = JSON.stringify("PONG");
+/** What the server logs when the handshake rejects the fixture's certificate. */
+const UNTRUSTED = /client error: self-signed certificate/;
+/** What ioredis reports when the connect timeout fires before the handshake completes. */
+const STALLED = /connect ETIMEDOUT/;
+
+/**
+ * A TCP server that accepts and never writes a byte, so a TLS client's
+ * handshake stalls until its own connect timeout gives up.
+ */
+async function startStalledServer(): Promise<{ port: number; close(): Promise<void> }> {
+  const sockets = new Set<Socket>();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+    socket.on("close", () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  return {
+    port: (server.address() as AddressInfo).port,
+    close: () =>
+      new Promise<void>((done) => {
+        for (const socket of sockets) socket.destroy();
+        server.close(() => done());
+      }),
+  };
+}
+
+/** Run `fn` with console.error captured, and return what it logged. */
+async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; stderr: string }> {
+  const original = console.error;
+  const lines: string[] = [];
+  console.error = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  try {
+    return { result: await fn(), stderr: lines.join("\n") };
+  } finally {
+    console.error = original;
+  }
+}
 
 /**
  * The server's own client over rediss://, in this process. No oam needed, so
  * this runs on every box: it pins api.ts's TLS wiring (the `tls` option from
- * REDIS_TLS_REJECT_UNAUTHORIZED) end to end against a real TLS server.
+ * REDIS_TLS_REJECT_UNAUTHORIZED, the connect timeout) end to end against a real
+ * TLS server.
  */
 describe("the server's client over rediss://", () => {
   let server: TlsRespServer;
-  const saved = { url: process.env.REDIS_URL, reject: process.env.REDIS_TLS_REJECT_UNAUTHORIZED };
+  const KEYS = ["REDIS_URL", "REDIS_TLS_REJECT_UNAUTHORIZED", "REDIS_CONNECT_TIMEOUT_MS", "REDIS_COMMAND_TIMEOUT_MS"];
+  const saved = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
   before(async () => {
     server = await startTlsRespServer();
   });
   after(async () => {
     await shutdown();
     await server.close();
-    if (saved.url === undefined) delete process.env.REDIS_URL;
-    else process.env.REDIS_URL = saved.url;
-    if (saved.reject === undefined) delete process.env.REDIS_TLS_REJECT_UNAUTHORIZED;
-    else process.env.REDIS_TLS_REJECT_UNAUTHORIZED = saved.reject;
+    for (const key of KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
   });
-
-  it("answers PING, and reconnects after the server drops the connection", async () => {
+  /** A fresh client on the next call, built from `env`. */
+  async function configure(env: Record<string, string | undefined>) {
     await shutdown();
-    process.env.REDIS_URL = `rediss://127.0.0.1:${server.port}`;
-    process.env.REDIS_TLS_REJECT_UNAUTHORIZED = "false";
+    for (const key of KEYS) delete process.env[key];
+    for (const [key, value] of Object.entries(env)) if (value !== undefined) process.env[key] = value;
+  }
+
+  it("answers PING, and reconnects over a new connection after the server drops it", async () => {
+    await configure({ REDIS_URL: `rediss://127.0.0.1:${server.port}`, REDIS_TLS_REJECT_UNAUTHORIZED: "false" });
+    // ioredis sends INFO once per connection, as its ready check, so a second
+    // INFO is a second connection: the proof that the reconnect happened.
+    const readyChecks = () => server.received.filter((command) => command[0]?.toUpperCase() === "INFO").length;
     assert.deepEqual(await runCommand("PING", []), { ok: true, data: "PONG" });
+    const before = readyChecks();
+    assert.ok(before >= 1, "the first connection must have run its ready check");
     await server.dropConnections();
     await sleep(300);
     assert.deepEqual(
@@ -49,17 +101,38 @@ describe("the server's client over rediss://", () => {
       { ok: true, data: "PONG" },
       "a dropped idle connection must reconnect",
     );
+    assert.equal(readyChecks(), before + 1, "the second PING must have gone over a new connection");
     assert.ok(getClient().options.tls, "rediss:// must have turned TLS on");
   });
 
   it("refuses the fixture's self-signed certificate when verification is on", async () => {
     // The control for the NODE_EXTRA_CA_CERTS cases below: without a trusted CA
-    // the handshake must fail, or those cases prove nothing.
-    await shutdown();
-    process.env.REDIS_URL = `rediss://127.0.0.1:${server.port}`;
-    delete process.env.REDIS_TLS_REJECT_UNAUTHORIZED;
-    const reply = await runCommand("PING", []);
-    assert.equal(reply.ok, false, JSON.stringify(reply));
+    // the handshake must fail -- for the certificate, not for any other reason.
+    await configure({ REDIS_URL: `rediss://127.0.0.1:${server.port}` });
+    const { result, stderr } = await captureStderr(() => runCommand("PING", []));
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.match(stderr, UNTRUSTED);
+  });
+
+  it("gives up on a stalled TLS handshake at the connect timeout, not the command timeout", async () => {
+    const stalled = await startStalledServer();
+    try {
+      await configure({
+        REDIS_URL: `rediss://127.0.0.1:${stalled.port}`,
+        REDIS_TLS_REJECT_UNAUTHORIZED: "false",
+        REDIS_CONNECT_TIMEOUT_MS: "500",
+        REDIS_COMMAND_TIMEOUT_MS: "20000",
+      });
+      const started = Date.now();
+      const { result, stderr } = await captureStderr(() => runCommand("PING", []));
+      const elapsed = Date.now() - started;
+      assert.equal(result.ok, false, JSON.stringify(result));
+      assert.match(stderr, STALLED);
+      assert.ok(elapsed < 10_000, `gave up after ${elapsed}ms; the 20s command timeout must not be what ended it`);
+    } finally {
+      await shutdown();
+      await stalled.close();
+    }
   });
 });
 
@@ -79,16 +152,24 @@ const atLeast = (v: number[], min: number[]) => {
   return true;
 };
 
+/** Where `command` resolves on PATH, for naming the binary a run tested; itself when it is a path. */
+function resolveOnPath(command: string): string {
+  if (/[\\/]/.test(command)) return command;
+  const probe = spawnSync(process.platform === "win32" ? "where" : "which", [command], { encoding: "utf8" });
+  return probe.status === 0 ? (probe.stdout.split(/\r?\n/)[0] ?? command) : command;
+}
+
 /**
  * The newest oam this box can run at or above the launcher's floor: OAM_BIN,
  * `oam` on PATH, then the default install locations, each asked for its
  * version with the launcher's own 5s budget. Discovery here is deliberately
  * its own few lines rather than the launcher's: the launcher's discovery is
- * what the cases below exercise. The skip reason names every candidate that
- * answered, and every one that was present but would not, so "no oam" and
- * "an oam that is broken" read differently.
+ * what the cases below exercise. On a version tie the earlier candidate wins,
+ * as in the launcher, so OAM_BIN pins the binary under test. The skip reason
+ * names every candidate that answered, and every one that was present but
+ * would not, so "no oam" and "an oam that is broken" read differently.
  */
-function findOam(): { path: string; version: string } | { skip: string } {
+function findOam(): { path: string; version: string; resolved: string } | { skip: string } {
   const exe = process.platform === "win32" ? "oam.exe" : "oam";
   const candidates = [
     process.env.OAM_BIN,
@@ -112,10 +193,12 @@ function findOam(): { path: string; version: string } | { skip: string } {
     }
     const version = [Number(match[1]), Number(match[2]), Number(match[3])];
     seen.push(`${candidate} (${match[0]})`);
-    if (!best || atLeast(version, best.version)) best = { path: candidate, version, text: match[0] };
+    const newer = !best || (atLeast(version, best.version) && version.join(".") !== best.version.join("."));
+    if (newer) best = { path: candidate, version, text: match[0] };
   }
   const floor = launcherFloor();
-  if (best && atLeast(best.version, floor)) return { path: best.path, version: best.text };
+  if (best && atLeast(best.version, floor))
+    return { path: best.path, version: best.text, resolved: resolveOnPath(best.path) };
   return {
     skip: `no oam at or above the launcher floor ${floor.join(".")} was found${seen.length ? ` (saw ${seen.join(", ")})` : ""}`,
   };
@@ -236,14 +319,17 @@ async function mcpPing(
 /**
  * The environment every launcher case starts from. The developer's shell must
  * not be able to change what is asserted: drop every REDIS_* and OAM_*
- * variable, NODE_OPTIONS (which could preload into the Node side) and
+ * variable, NODE_OPTIONS (which could preload into the Node side),
  * NODE_EXTRA_CA_CERTS (which would trust the fixture where a case means not
- * to), then set exactly what each case needs.
+ * to) and NODE_TLS_REJECT_UNAUTHORIZED (which would turn verification off
+ * underneath every case), then set exactly what each case needs.
  */
 function cleanEnv(extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return {
     ...Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => !/^(REDIS_|OAM_|NODE_OPTIONS$|NODE_EXTRA_CA_CERTS$)/i.test(key)),
+      Object.entries(process.env).filter(
+        ([key]) => !/^(REDIS_|OAM_|NODE_OPTIONS$|NODE_EXTRA_CA_CERTS$|NODE_TLS_REJECT_UNAUTHORIZED$)/i.test(key),
+      ),
     ),
     ...extra,
   };
@@ -283,13 +369,54 @@ describe("rediss:// on Node, through the launcher", { skip: built }, () => {
     assert.deepEqual(run.results, [PONG], JSON.stringify(run));
     assert.match(run.stderr, /ready \(.*\) on node /);
     assert.equal(run.code, 0);
+    // Control: the same launch without the CA must fail on the certificate, or
+    // the pass above could come from a path that does not verify at all.
+    const control = await mcpPing(
+      process.execPath,
+      [LAUNCHER],
+      cleanEnv({ REDIS_URL: `rediss://127.0.0.1:${server.port}`, REDIS_MCP_RUNTIME: "node" }),
+      t.signal,
+    );
+    assert.equal(control.results.length, 1, JSON.stringify(control));
+    assert.notDeepEqual(control.results, [PONG], JSON.stringify(control));
+    assert.match(control.stderr, UNTRUSTED, JSON.stringify(control));
+  });
+
+  it("gives a host that runs dist/index.js directly on an old oam an error to act on, not a crash", {
+    timeout,
+  }, async (t) => {
+    // That host skips the launcher and its version floor. On oam 0.15.2 a TLS
+    // connection used to kill the process on the first tool call; the server now
+    // refuses it before dialling. Node posing as oam 0.15.2 stands in for it --
+    // the refusal reads `process.versions.oam` and nothing else.
+    const posing = `Object.defineProperty(process.versions, "oam", { value: "0.15.2", enumerable: true });`;
+    const receivedBefore = server.received.length;
+    const run = await mcpPing(
+      process.execPath,
+      ["--import", `data:text/javascript,${encodeURIComponent(posing)}`, DIST_BIN],
+      cleanEnv({ REDIS_URL: `rediss://127.0.0.1:${server.port}`, REDIS_TLS_REJECT_UNAUTHORIZED: "false" }),
+      t.signal,
+    );
+    assert.equal(run.code, 0, `the server must keep running: ${JSON.stringify(run)}`);
+    assert.equal(run.results.length, 1, JSON.stringify(run));
+    assert.match(
+      run.results[0] ?? "",
+      /^Error: TLS \(rediss:\/\/\) needs oam 0\.15\.3 or newer, and this server is running on oam 0\.15\.2/,
+    );
+    assert.match(run.stderr, /ready \(.*\) on oam 0\.15\.2/);
+    assert.match(
+      run.stderr,
+      /^@yawlabs\/redis-mcp: TLS \(rediss:\/\/\) needs oam 0\.15\.3 or newer/m,
+      "said at startup too",
+    );
+    assert.equal(server.received.length, receivedBefore, "nothing may have been dialled");
   });
 });
 
 const oam = findOam();
 const skip = built || ("skip" in oam ? oam.skip : false);
 
-describe(`rediss:// under a real oam${"path" in oam ? ` (${oam.version} at ${oam.path})` : ""}`, { skip }, () => {
+describe(`rediss:// under a real oam${"path" in oam ? ` (${oam.version} at ${oam.resolved})` : ""}`, { skip }, () => {
   let server: TlsRespServer;
   let env: NodeJS.ProcessEnv;
   let caDir: string;
@@ -379,7 +506,12 @@ describe(`rediss:// under a real oam${"path" in oam ? ` (${oam.version} at ${oam
     // A managed Redis ends idle connections. Before 0.15.3, oam's TLS socket
     // emitted `end` and then nothing, so ioredis never saw the `close` it
     // reconnects on, stayed `ready`, and every later command timed out.
+    // ioredis runs INFO once per connection as its ready check, so the count
+    // across the drop proves the second PING went over a new connection.
+    const readyChecks = () => server.received.filter((command) => command[0]?.toUpperCase() === "INFO").length;
+    let beforeDrop = 0;
     const run = await mcpPing(oamPath, ["run", LAUNCHER], env, t.signal, 2, async () => {
+      beforeDrop = readyChecks();
       await server.dropConnections();
       // The client's `end` arrives one loopback packet later; a short pause
       // keeps the second PING from racing the drop it is meant to survive.
@@ -388,6 +520,7 @@ describe(`rediss:// under a real oam${"path" in oam ? ` (${oam.version} at ${oam
     assert.deepEqual(run.results, [PONG, PONG], JSON.stringify(run));
     assert.match(run.stderr, servedByOam);
     assert.equal(run.code, 0);
+    assert.equal(readyChecks(), beforeDrop + 1, "the second PING must have gone over a new connection");
   });
 
   it("verifies a private CA named only by NODE_EXTRA_CA_CERTS, sandbox included", { timeout }, async (t) => {
@@ -398,7 +531,7 @@ describe(`rediss:// under a real oam${"path" in oam ? ` (${oam.version} at ${oam
       REDIS_URL: `rediss://127.0.0.1:${server.port}`,
       NODE_EXTRA_CA_CERTS: join(caDir, "ca.pem"),
     });
-    for (const [label, command, args, extra] of [
+    const paths = [
       ["oam run", oamPath, ["run", LAUNCHER], {}],
       [
         "sandboxed",
@@ -406,17 +539,51 @@ describe(`rediss:// under a real oam${"path" in oam ? ` (${oam.version} at ${oam
         [LAUNCHER],
         { OAM_BIN: oamPath, REDIS_MCP_RUNTIME: "oam", REDIS_MCP_SANDBOX: "1" },
       ],
-    ] as const) {
+    ] as const;
+    for (const [label, command, args, extra] of paths) {
       const run = await mcpPing(command, [...args], { ...trusted, ...extra }, t.signal);
       assert.deepEqual(run.results, [PONG], `${label}: ${JSON.stringify(run)}`);
       assert.match(run.stderr, servedByOam, label);
       assert.equal(run.code, 0, label);
+      // Control, on the same path: without the CA it must fail on the
+      // certificate, or the pass above could come from a path that does not
+      // verify at all.
+      const untrusted = cleanEnv({ REDIS_URL: `rediss://127.0.0.1:${server.port}`, ...extra });
+      const control = await mcpPing(command, [...args], untrusted, t.signal);
+      assert.equal(control.results.length, 1, `${label} control: ${JSON.stringify(control)}`);
+      assert.notDeepEqual(control.results, [PONG], `${label} control: ${JSON.stringify(control)}`);
+      assert.match(control.stderr, UNTRUSTED, `${label} control: ${JSON.stringify(control)}`);
+      assert.match(control.stderr, servedByOam, `${label} control`);
     }
-    // Control: the same run without the CA must fail, or the pass above could
-    // come from a runtime that does not verify at all.
-    const untrusted = cleanEnv({ REDIS_URL: `rediss://127.0.0.1:${server.port}` });
-    const control = await mcpPing(oamPath, ["run", LAUNCHER], untrusted, t.signal);
-    assert.notDeepEqual(control.results, [PONG], `without the CA the handshake must fail: ${JSON.stringify(control)}`);
-    assert.equal(control.results.length, 1, JSON.stringify(control));
+  });
+
+  it("gives up on a stalled TLS handshake at the connect timeout, not the command timeout", { timeout }, async (t) => {
+    // ioredis arms its connect timeout only while the socket reports
+    // `connecting` and has `setTimeout` -- two of the members oam's TLS socket
+    // lacked before 0.15.3. Without them a handshake that never completes waits
+    // out the command timeout instead.
+    const stalled = await startStalledServer();
+    try {
+      const started = Date.now();
+      const run = await mcpPing(
+        oamPath,
+        ["run", LAUNCHER],
+        {
+          ...env,
+          REDIS_URL: `rediss://127.0.0.1:${stalled.port}`,
+          REDIS_CONNECT_TIMEOUT_MS: "500",
+          REDIS_COMMAND_TIMEOUT_MS: "20000",
+        },
+        t.signal,
+      );
+      const elapsed = Date.now() - started;
+      assert.equal(run.results.length, 1, JSON.stringify(run));
+      assert.notDeepEqual(run.results, [PONG], JSON.stringify(run));
+      assert.match(run.stderr, STALLED, JSON.stringify(run));
+      assert.match(run.stderr, servedByOam);
+      assert.ok(elapsed < 15_000, `gave up after ${elapsed}ms; the 20s command timeout must not be what ended it`);
+    } finally {
+      await stalled.close();
+    }
   });
 });
