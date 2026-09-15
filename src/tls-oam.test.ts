@@ -21,6 +21,13 @@ const PONG = JSON.stringify("PONG");
 const UNTRUSTED = /client error: self-signed certificate/;
 /** What ioredis reports when the connect timeout fires before the handshake completes. */
 const STALLED = /connect ETIMEDOUT/;
+/**
+ * What ioredis reports when the command timeout fires first. The stalled cases
+ * set it BELOW ioredis's own 10s connect-timeout default, so a server that
+ * stopped passing REDIS_CONNECT_TIMEOUT_MS on shows up as this instead of as a
+ * slower STALLED.
+ */
+const COMMAND_TIMED_OUT = /Command timed out/;
 
 /**
  * A TCP server that accepts and never writes a byte, so a TLS client's
@@ -121,14 +128,15 @@ describe("the server's client over rediss://", () => {
         REDIS_URL: `rediss://127.0.0.1:${stalled.port}`,
         REDIS_TLS_REJECT_UNAUTHORIZED: "false",
         REDIS_CONNECT_TIMEOUT_MS: "500",
-        REDIS_COMMAND_TIMEOUT_MS: "20000",
+        REDIS_COMMAND_TIMEOUT_MS: "5000",
       });
       const started = Date.now();
       const { result, stderr } = await captureStderr(() => runCommand("PING", []));
       const elapsed = Date.now() - started;
       assert.equal(result.ok, false, JSON.stringify(result));
       assert.match(stderr, STALLED);
-      assert.ok(elapsed < 10_000, `gave up after ${elapsed}ms; the 20s command timeout must not be what ended it`);
+      assert.doesNotMatch(`${JSON.stringify(result)}\n${stderr}`, COMMAND_TIMED_OUT);
+      assert.ok(elapsed < 4_500, `gave up after ${elapsed}ms; the 5s command timeout must not be what ended it`);
     } finally {
       await shutdown();
       await stalled.close();
@@ -421,6 +429,8 @@ describe(`rediss:// under a real oam${"path" in oam ? ` (${oam.version} at ${oam
   let env: NodeJS.ProcessEnv;
   let caDir: string;
   const oamPath = "path" in oam ? oam.path : "";
+  /** The same oam as an absolute path, for a run whose PATH no longer finds it by name. */
+  const oamResolved = "resolved" in oam ? oam.resolved : "";
   const oamVersion = "version" in oam ? oam.version : "";
   /** The banner the server prints when oam, not a Node fallback, is serving. */
   const servedByOam = new RegExp(`ready \\(.*\\) on oam ${oamVersion.replace(/\./g, "\\.")}`);
@@ -456,8 +466,8 @@ describe(`rediss:// under a real oam${"path" in oam ? ` (${oam.version} at ${oam
   });
 
   it("answers PING inside the sandbox, whose net grant is the rediss:// host and port", { timeout }, async (t) => {
-    // REDIS_MCP_RUNTIME=oam here: under `auto` the sandbox can silently not
-    // apply, and this case is about --permission being in force.
+    // REDIS_MCP_RUNTIME=oam here: under `auto` a fallback runs unsandboxed,
+    // and this case is about --permission being in force.
     const run = await mcpPing(
       process.execPath,
       [LAUNCHER],
@@ -467,6 +477,41 @@ describe(`rediss:// under a real oam${"path" in oam ? ` (${oam.version} at ${oam
     assert.deepEqual(run.results, [PONG], JSON.stringify(run));
     assert.match(run.stderr, servedByOam);
     assert.equal(run.code, 0);
+  });
+
+  it("applies the sandbox under `oam run` by relaunching that same oam, when no other oam can be found", {
+    timeout,
+  }, async (t) => {
+    // A host that bundles its own oam launches the bin with it, and that binary
+    // is in no install dir and not on PATH. REDIS_MCP_SANDBOX=1 used to find no
+    // oam to spawn there and serve in-process, unsandboxed, with a note saying
+    // no oam was found while running on one. HOME, USERPROFILE and LOCALAPPDATA
+    // point at an empty directory and PATH holds only Node's, so the host's own
+    // binary is the only oam in reach.
+    const empty = mkdtempSync(join(tmpdir(), "redis-mcp-no-oam-"));
+    try {
+      const run = await mcpPing(
+        oamResolved,
+        ["run", LAUNCHER],
+        {
+          ...env,
+          PATH: dirname(process.execPath),
+          HOME: empty,
+          USERPROFILE: empty,
+          LOCALAPPDATA: empty,
+          REDIS_MCP_SANDBOX: "1",
+        },
+        t.signal,
+      );
+      assert.deepEqual(run.results, [PONG], JSON.stringify(run));
+      assert.match(run.stderr, servedByOam);
+      // The fallback this replaced still answers PONG on oam; its note is what
+      // tells them apart.
+      assert.doesNotMatch(run.stderr, /^redis-mcp: /m, `a relaunch is not a fallback: ${JSON.stringify(run)}`);
+      assert.equal(run.code, 0);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
   });
 
   it("answers PING inside the sandbox for an IPv6 literal REDIS_URL", { timeout }, async (t) => {
@@ -561,10 +606,11 @@ describe(`rediss:// under a real oam${"path" in oam ? ` (${oam.version} at ${oam
     // ioredis arms its connect timeout only while the socket reports
     // `connecting` and has `setTimeout` -- two of the members oam's TLS socket
     // lacked before 0.15.3. Without them a handshake that never completes waits
-    // out the command timeout instead.
+    // out the command timeout instead. No elapsed-time bound: it would have to
+    // absorb oam's startup on a contended box, and COMMAND_TIMED_OUT already
+    // tells the two timeouts apart.
     const stalled = await startStalledServer();
     try {
-      const started = Date.now();
       const run = await mcpPing(
         oamPath,
         ["run", LAUNCHER],
@@ -572,16 +618,15 @@ describe(`rediss:// under a real oam${"path" in oam ? ` (${oam.version} at ${oam
           ...env,
           REDIS_URL: `rediss://127.0.0.1:${stalled.port}`,
           REDIS_CONNECT_TIMEOUT_MS: "500",
-          REDIS_COMMAND_TIMEOUT_MS: "20000",
+          REDIS_COMMAND_TIMEOUT_MS: "5000",
         },
         t.signal,
       );
-      const elapsed = Date.now() - started;
       assert.equal(run.results.length, 1, JSON.stringify(run));
       assert.notDeepEqual(run.results, [PONG], JSON.stringify(run));
       assert.match(run.stderr, STALLED, JSON.stringify(run));
+      assert.doesNotMatch(`${run.results.join("\n")}\n${run.stderr}`, COMMAND_TIMED_OUT, JSON.stringify(run));
       assert.match(run.stderr, servedByOam);
-      assert.ok(elapsed < 15_000, `gave up after ${elapsed}ms; the 20s command timeout must not be what ended it`);
     } finally {
       await stalled.close();
     }

@@ -350,6 +350,13 @@ describe("TLS on an oam too old to carry it", () => {
     assert.throws(() => getClient(), /needs oam 0\.15\.3/);
   });
 
+  it("refuses TLS turned on by a tls query parameter too", () => {
+    poseAsOam("0.15.2");
+    process.env.REDIS_URL = "redis://127.0.0.1:1?tls=true";
+    assert.throws(() => getClient(), /needs oam 0.15.3/);
+    assert.equal(wouldUseTls(), true);
+  });
+
   it("refuses TLS turned on by REDIS_TLS_REJECT_UNAUTHORIZED too, and leaves plain redis:// alone", async () => {
     poseAsOam("0.15.2");
     process.env.REDIS_URL = "redis://127.0.0.1:1";
@@ -378,6 +385,12 @@ describe("TLS on an oam too old to carry it", () => {
       ["redis://127.0.0.1:1", "yes"],
       ["rediss://127.0.0.1:1", "0"],
       ["127.0.0.1:1", undefined],
+      // ioredis turns TLS on from the query string too: any non-empty value,
+      // including its named profiles. An empty one leaves it off.
+      ["redis://127.0.0.1:1?tls=true", undefined],
+      ["redis://127.0.0.1:1?tls=RedisCloudFixed", undefined],
+      ["redis://127.0.0.1:1?tls=", undefined],
+      ["127.0.0.1:1?tls=1", undefined],
     ];
     const original = console.error;
     console.error = () => {};

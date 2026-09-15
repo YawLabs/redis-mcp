@@ -212,17 +212,27 @@ export function tlsRuntimeProblem(oamVersion: string | undefined = process.versi
 }
 
 /**
- * Whether the client getClient() builds will use TLS, read the way ioredis
- * reads it: a URL that starts with `rediss://` (case-sensitive, as ioredis
- * checks it), or a `tls` option, which this server passes whenever
- * REDIS_TLS_REJECT_UNAUTHORIZED holds a recognized value. For the startup
- * warning; getClient() itself checks the built client's options.
+ * Whether the client getClient() builds will use TLS: a `rediss://` URL, a
+ * `tls` query parameter (ioredis reads `?tls=true` and its named profiles
+ * such as `?tls=RedisCloudFixed`), or the `tls` option this server passes
+ * whenever REDIS_TLS_REJECT_UNAUTHORIZED holds a recognized value. Answered by
+ * ioredis itself, from a throwaway client that never connects, so it cannot
+ * drift from what getClient() decides. False when REDIS_URL is unset or
+ * unparseable -- the server reports those on its own. For the startup warning.
  */
 export function wouldUseTls(): boolean {
-  return (
-    (process.env.REDIS_URL ?? "").startsWith("rediss://") ||
-    parseTlsEnv(process.env.REDIS_TLS_REJECT_UNAUTHORIZED) !== undefined
-  );
+  const url = process.env.REDIS_URL;
+  if (!url || url.trim() === "") return false;
+  const tls = parseTlsEnv(process.env.REDIS_TLS_REJECT_UNAUTHORIZED);
+  let probe: Redis;
+  try {
+    probe = new Redis(url, { lazyConnect: true, ...(tls ? { tls } : {}) });
+  } catch {
+    return false;
+  }
+  const uses = Boolean(probe.options.tls);
+  probe.disconnect();
+  return uses;
 }
 
 /**

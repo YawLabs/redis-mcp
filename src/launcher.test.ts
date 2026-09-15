@@ -467,6 +467,21 @@ const timeout = 45_000;
 /** Every note the launcher itself wrote (lines starting `redis-mcp: `). */
 const launcherNotes = (stderr: string) => stderr.split(/\r?\n/).filter((line) => line.startsWith("redis-mcp: "));
 
+/**
+ * The argv the launcher handed its child, recorded by runLauncher's spawn
+ * wrapper: the wiring, not just netGrant in isolation. With OAM_BIN pinned to
+ * Node the child is Node, which cannot run oam's flags -- that does not matter,
+ * the argv is captured before it starts.
+ */
+const spawnedArgv = (stderr: string): string[] => {
+  const line = /^LAUNCHER_SPAWN=(.*?)\r?$/m.exec(stderr)?.[1];
+  assert.ok(
+    line,
+    "no LAUNCHER_SPAWN line: the launcher spawned nothing, or spawned through a path runLauncher's recorder does not wrap (it wraps child_process.spawn only)",
+  );
+  return JSON.parse(line) as string[];
+};
+
 const servedInProcess = (run: LauncherRun) => run.code === 0 && run.stdout.trim() === PACKAGE_VERSION;
 
 describe("launcher on an oam host", () => {
@@ -507,20 +522,6 @@ describe("launcher on an oam host", () => {
 });
 
 describe("launcher sandbox grant, as passed to the spawned oam", () => {
-  /**
-   * The argv the launcher handed its child, recorded by runLauncher's spawn
-   * wrapper: the wiring, not just netGrant in isolation. With OAM_BIN pinned to
-   * Node the child is Node, which cannot run oam's flags -- that does not
-   * matter, the argv is captured before it starts.
-   */
-  const spawnedArgv = (stderr: string): string[] => {
-    const line = /^LAUNCHER_SPAWN=(.*?)\r?$/m.exec(stderr)?.[1];
-    assert.ok(
-      line,
-      "no LAUNCHER_SPAWN line: the launcher spawned nothing, or spawned through a path runLauncher's recorder does not wrap (it wraps child_process.spawn only)",
-    );
-    return JSON.parse(line) as string[];
-  };
   /**
    * The one net grant in the process-level flags. Exactly one: oam applies the
    * LAST `--allow-net` it sees, so a second, bare one appended by a regression
@@ -633,12 +634,30 @@ describe("launcher with no usable oam", () => {
 
   it("refuses to serve on a below-floor oam host when there is no Node either", { skip, timeout }, async () => {
     const noNode = mkdtempSync(join(tmpdir(), "redis-mcp-launcher-nopath-"));
-    const run = await runLauncher("0.9.0", isolated({ PATH: noNode, OAM_BIN: join(noNode, "oam.exe") }));
+    const envs: Record<string, string>[] = [{}, { REDIS_MCP_SANDBOX: "1", REDIS_URL: "redis://127.0.0.1:1" }];
+    for (const extra of envs) {
+      const run = await runLauncher("0.9.0", isolated({ PATH: noNode, OAM_BIN: join(noNode, "oam.exe"), ...extra }));
+      assert.equal(run.code, 1, JSON.stringify(run));
+      assert.equal(run.stdout.trim(), "", "nothing may be served");
+      assert.match(run.stderr, /no Node was found on PATH/);
+      // Nothing before it may have promised the Node fallback that did not
+      // happen, and with nothing running there is no sandbox to report dropped.
+      assert.doesNotMatch(run.stderr, /using Node instead|running on |without --permission|SANDBOX/);
+    }
+  });
+
+  it("says REDIS_MCP_RUNTIME=node found no Node, on a supported oam host with none on PATH", {
+    skip,
+    timeout,
+  }, async () => {
+    const noNode = mkdtempSync(join(tmpdir(), "redis-mcp-launcher-nopath-"));
+    const run = await runLauncher("0.15.3", isolated({ PATH: noNode, REDIS_MCP_RUNTIME: "node" }));
     assert.equal(run.code, 1, JSON.stringify(run));
     assert.equal(run.stdout.trim(), "", "nothing may be served");
-    assert.match(run.stderr, /no Node was found on PATH/);
-    // Nothing before it may have promised the Node fallback that did not happen.
-    assert.doesNotMatch(run.stderr, /using Node instead|running on /);
+    // This oam is new enough, so the remedy is Node or dropping the override,
+    // not updating oam.
+    assert.deepEqual(launcherNotes(run.stderr), ["redis-mcp: REDIS_MCP_RUNTIME=node, but no Node was found on PATH."]);
+    assert.match(run.stderr, /^Install Node, or unset REDIS_MCP_RUNTIME to serve on this oam 0\.15\.3\.\r?$/m);
   });
 
   it("hands REDIS_MCP_RUNTIME=node off to Node even on a supported oam host", { skip, timeout }, async () => {
@@ -648,17 +667,43 @@ describe("launcher with no usable oam", () => {
     assert.match(run.stderr, /LAUNCHER_ARGV1=.*redis-mcp\.mjs/);
   });
 
-  it("falls back in-process on a supported oam host under REDIS_MCP_SANDBOX=1 and auto", {
+  it("relaunches a supported oam host's own binary under REDIS_MCP_SANDBOX=1, with nothing else to find", {
     skip,
     timeout,
   }, async () => {
-    // The documented, unsandboxed fallback: a supported host oam may serve the
-    // server itself, so with nothing to spawn it does -- without --permission,
-    // and the note says so rather than claiming Node.
-    const run = await runLauncher("0.15.3", isolated({ REDIS_MCP_SANDBOX: "1", REDIS_URL: "redis://127.0.0.1:1" }));
+    // The host's binary is process.execPath, which here is this Node: posing as
+    // an oam of Node's own version makes `--version` answer as that very oam.
+    // OAM_BIN is unset and nothing is installed or on PATH, so the spawn can
+    // only be the host binary, and it must carry the sandbox.
+    const run = await runLauncher(
+      process.versions.node,
+      isolated({ OAM_BIN: "", REDIS_MCP_SANDBOX: "1", REDIS_URL: "redis://127.0.0.1:1" }),
+    );
+    assert.equal(servedInProcess(run), false, JSON.stringify(run));
+    const argv = spawnedArgv(run.stderr);
+    assert.deepEqual(argv.slice(0, 2), ["--permission", "--allow-net=127.0.0.1:1"], JSON.stringify(argv));
+    assert.deepEqual(launcherNotes(run.stderr), [], "a relaunch is not a fallback, and needs no note");
+  });
+
+  it("falls back in-process on a supported oam host whose own binary is not that oam", { skip, timeout }, async () => {
+    // The documented, unsandboxed fallback: Node posing as oam 0.15.3 answers
+    // `--version` as Node -- an execPath that is not the oam CLI, like an
+    // `oam compile`d executable -- so there is nothing to relaunch and nothing
+    // to spawn. The host
+    // serves the server itself -- without --permission, and the note names the
+    // binary it passed over rather than saying no oam was found.
+    const run = await runLauncher(
+      "0.15.3",
+      isolated({ OAM_BIN: "", REDIS_MCP_SANDBOX: "1", REDIS_URL: "redis://127.0.0.1:1" }),
+    );
     assert.equal(servedInProcess(run), true, JSON.stringify(run));
     assert.match(run.stderr, /LAUNCHER_ARGV1=.*dist[\\/]index\.js/);
-    assert.match(run.stderr, /does not exist; serving in-process on this oam 0\.15\.3, without --permission\.$/m);
+    assert.deepEqual(
+      launcherNotes(run.stderr).map((note) => note.replace(/binary, .*, did not/, "binary, <execPath>, did not")),
+      [
+        "redis-mcp: this oam's own binary, <execPath>, did not answer --version as oam 0.15.3; serving in-process on this oam 0.15.3, without --permission.",
+      ],
+    );
   });
 
   it("exits instead under REDIS_MCP_SANDBOX=1 with REDIS_MCP_RUNTIME=oam", { skip, timeout }, async () => {
@@ -762,7 +807,10 @@ describe("launcher with no usable oam", () => {
     assert.equal(run.code, 0, JSON.stringify(run));
     const notes = launcherNotes(run.stderr);
     assert.equal(notes.length, 1, JSON.stringify(notes));
-    assert.match(notes[0] ?? "", /\(REDIS_MCP_SANDBOX=1 is not applied on Node\); running on .*node/);
+    assert.match(
+      notes[0] ?? "",
+      /^redis-mcp: this process is oam 0\.15\.2, older than 0\.15\.3, and no newer oam was found \(OAM_BIN=.* does not exist\); running on .*node.* instead, without --permission; update oam from https:\/\/oamjs\.org to use it \(0\.15\.3 or newer\)\.$/,
+    );
   });
 
   it("tells a Node host with a working but outdated oam to update it", { skip, timeout }, async () => {
