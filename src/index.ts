@@ -3,7 +3,7 @@
 import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { isWritesAllowed, shutdown, validateConfig } from "./api.js";
+import { isWritesAllowed, shutdown, tlsRuntimeProblem, validateConfig, wouldUseTls } from "./api.js";
 import { toMcpResponse } from "./mcp-response.js";
 import { advisorTools } from "./tools/advisor.js";
 import { healthTools } from "./tools/health.js";
@@ -87,6 +87,11 @@ server.connect(transport).catch((err: unknown) => {
 const writesNote = isWritesAllowed() ? "writes ENABLED" : "read-only";
 const runtime = process.versions.oam ? `oam ${process.versions.oam}` : `node ${process.versions.node}`;
 console.error(`@yawlabs/redis-mcp v${version} ready (${allTools.length} tools, ${writesNote}) on ${runtime}`);
+// A host that runs dist/index.js directly under an old oam skips the launcher's
+// version floor. Every tool call returns this as its error; saying it once at
+// startup too puts the cause in the host's log before anyone calls a tool.
+const tlsProblem = wouldUseTls() ? tlsRuntimeProblem() : null;
+if (tlsProblem) console.error(`@yawlabs/redis-mcp: ${tlsProblem}`);
 
 // Clean shutdown: close the Redis connection when the transport closes.
 const cleanup = async () => {
