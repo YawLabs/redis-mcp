@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-09-15
+
 ### Changed
 - **The MCP SDK devDependency moves from `^1.29.0` to `^1.30.0`, and `npm audit` goes from 7 findings (3 high, 2 moderate, 2 low) to 0.** All but one advisory arrived transitively through the SDK, and the refreshed lockfile moves each package past its first patched version: `fast-uri` 3.1.2 to 3.1.7, `hono` 4.12.23 to 4.13.7, `@hono/node-server` 1.19.14 to 2.1.1, `ip-address` 10.2.0 to 10.7.0, `qs` 6.15.2 to 6.16.0 and `body-parser` 2.2.2 to 2.3.0; the one exception, `esbuild`, is a direct devDependency with its own low-severity advisory (arbitrary file read from its dev server on Windows, which this repo never starts) and goes 0.28.0 to 0.28.2. Of these only `fast-uri` (via the SDK's `ajv` validator) is inlined into the published `dist/index.js` — `src/index.ts` imports only `McpServer` and the stdio transport, so esbuild tree-shakes out the SDK's HTTP stack (`hono`, `@hono/node-server`, `express`, `ip-address`, `qs`, `body-parser`), and `esbuild` itself is the build tool. Every release through 0.5.0 carried `fast-uri` 3.1.2 in its bundle, inside the advised range of all six of its high-severity advisories (host confusion and SSRF through URI parsing). Practical exposure was low — `ajv` uses `fast-uri` only to resolve `$id`/`$ref` in the server's own zod-generated schemas and never loads a remote schema — but the package declares no runtime dependencies, so a fresh `npx` install cannot pick up the fix on its own; only a rebuilt release replaces the inlined copy.
 
