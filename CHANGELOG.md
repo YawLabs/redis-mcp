@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-15
+
 ### Changed
 - **The launcher uses oam 0.15.3 or newer, and the server no longer carries its own TLS socket shim.** oam 0.15.3 is the first release whose `tls.TLSSocket` has the `net.Socket` members ioredis needs and closes itself when the server hangs up ([YawLabs/oam#132](https://github.com/YawLabs/oam/issues/132)), which is what the shim added in 0.4.1 supplied, and it reads `NODE_EXTRA_CA_CERTS` ([YawLabs/oam#136](https://github.com/YawLabs/oam/issues/136)). `rediss://` connections are now plain ioredis on either runtime. Verified end to end on the published 0.15.3 — the server answers `PING` over `rediss://` on the `oam run` host path, in the default discovery path, inside the sandbox, over IPv6, after the server drops the connection, and gives up on a stalled handshake at the connect timeout. With only an older oam available, the launcher runs the server on Node instead: in its own process under `npx`, or handed off to Node on `PATH` from an old `oam run` host, which exits when there is no Node on `PATH`, as does `REDIS_MCP_RUNTIME=oam`. A `REDIS_MCP_SANDBOX=1` setup that relied on oam 0.15.2 therefore runs unsandboxed on Node until oam is updated, unless `REDIS_MCP_RUNTIME=oam` is also set; the launcher now says so (see Fixed).
 - **Running `dist/index.js` directly under oam now needs oam 0.15.3 for TLS.** That path skips the launcher and its version floor, and it was the one place the shim still engaged. On an older oam the server now refuses a TLS connection before dialling it: every tool call returns an error naming the version to update to, and the same line is written to stderr at startup, where the shim's removal would otherwise have crashed the process on the first `rediss://` tool call.
