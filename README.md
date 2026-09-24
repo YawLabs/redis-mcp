@@ -1,15 +1,15 @@
 # @yawlabs/redis-mcp
 
+[![Add to Yaw MCP](https://yaw.sh/yaw-mcp-button.svg)](https://yaw.sh/mcp/install?name=Redis&command=npx&args=-y%2C%40yawlabs%2Fredis-mcp&description=Explore%20and%20diagnose%20Redis%20-%20SCAN%20key%20exploration%2C%20health%2C%20DBA%20advisor&source=https%3A%2F%2Fgithub.com%2FYawLabs%2Fredis-mcp)
+
+One click adds this to your local Yaw MCP config so it's available in every Yaw Terminal session. Or install manually below.
+
 [![npm version](https://img.shields.io/npm/v/@yawlabs/redis-mcp)](https://www.npmjs.com/package/@yawlabs/redis-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 **Explore and diagnose a Redis instance from Claude Code, Cursor, and any MCP client.** Read-only by default - writes opt in via a single env var - and key enumeration always uses `SCAN`, never the O(N) `KEYS`, so it is safe to point at a production instance with millions of keys.
 
 Built and maintained by [Yaw Labs](https://yaw.sh).
-
-[![Add to Yaw MCP](https://yaw.sh/yaw-mcp-button.svg)](https://yaw.sh/mcp/install?name=Redis&command=npx&args=-y%2C%40yawlabs%2Fredis-mcp&description=Explore%20and%20diagnose%20Redis%20-%20SCAN%20key%20exploration%2C%20health%2C%20DBA%20advisor&source=https%3A%2F%2Fgithub.com%2FYawLabs%2Fredis-mcp)
-
-One click adds this to your local Yaw MCP config so it's available in every Yaw Terminal session. Or install manually below.
 
 ## Why this one?
 
@@ -186,4 +186,4 @@ The unit suite covers the pure logic - command allowlist enforcement, SCAN curso
 
 MIT © 2026 YawLabs
 
-[![Follow @TokenLimitNews on X](https://img.shields.io/badge/follow-%40TokenLimitNews-000000?logo=x&logoColor=white)](https://x.com/TokenLimitNews)
+[![Follow @YawLabs on X](https://img.shields.io/badge/follow-%40YawLabs-000000?logo=x&logoColor=white)](https://x.com/YawLabs)
