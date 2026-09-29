@@ -38,7 +38,22 @@ trap 'rm -rf "$TMP"' EXIT
 # Download the tarball straight from the registry. Equivalent to
 # `npm pack @yawlabs/redis-mcp@${VERSION}` but without writing a copy
 # into the current directory.
-npm pack "@yawlabs/redis-mcp@${VERSION}" --pack-destination="$TMP" >/dev/null
+# npm resolves the version through its CDN-cached package document, which can
+# trail the publish by minutes: the post-publish npx smoke for
+# @yawlabs/lemonsqueezy-mcp 1.0.1 needed 313 s (2026-09-29).
+# So the download is retried, 60 attempts 10 s apart. The checks below stay
+# single-shot: a broken tarball or a wrong version still fails at once.
+ATTEMPT=1
+until npm pack "@yawlabs/redis-mcp@${VERSION}" --pack-destination="$TMP" >/dev/null 2>"$TMP/pack.err"; do
+  if [ "$ATTEMPT" -ge 60 ]; then
+    cat "$TMP/pack.err" >&2
+    echo "[X] post-publish-smoke: npm could not fetch @yawlabs/redis-mcp@${VERSION} in 60 attempts" >&2
+    exit 1
+  fi
+  echo "[..] post-publish-smoke: @yawlabs/redis-mcp@${VERSION} is not fetchable yet (attempt ${ATTEMPT}/60) -- retrying in 10s"
+  ATTEMPT=$((ATTEMPT + 1))
+  sleep 10
+done
 
 # npm pack writes one or more .tgz files; the filename uses the unscoped
 # package name with a slash replaced by a dash. Pick the only .tgz in
