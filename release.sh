@@ -535,7 +535,9 @@ elif [ -f ".github/workflows/release.yml" ] && grep -q "npm publish\|NODE_AUTH_T
   fi
 else
   # Workstation IS the publisher (no CI fallback). Retry only on EOTP/EAUTH/OTP
-  # for fresh WebAuthn sessions; fail fast on everything else.
+  # for fresh WebAuthn sessions; npm's E403 "cannot publish over the previously
+  # published versions" counts as already published; fail fast on everything
+  # else.
   ATTEMPT=1
   MAX_ATTEMPTS=3
   NPM_ALREADY_THERE=false
@@ -636,11 +638,14 @@ fi
 #     through it can keep reporting the pre-publish answer well after the
 #     version is live -- the loop would then outlast the condition it is waiting
 #     on.
-#   * The EXACT URL the MCP Registry fetches. Its npm validator requests
+#   * The same PATH the MCP Registry fetches. Its npm validator requests
 #     <base>/url.PathEscape(name)/<version>, and Go's PathEscape turns the scope
 #     slash into %2F (`@yawlabs%2Fpkg`, the `@` left bare). A literal-slash URL
 #     reaches the same origin but can be a different CDN cache entry, so success
 #     there would be a proxy rather than evidence about the path that fails.
+#     npm_version_live adds a throwaway `_` query and no-cache headers, which
+#     make it a different cache key too -- harmless while npm serves that
+#     document uncached (CF-Cache-Status DYNAMIC).
 #   * WARN, never fail, on timeout. If propagation is genuinely stuck, letting
 #     mcp-publisher run produces its own precise error naming the version and
 #     status; a timeout message from this loop would replace that with something
