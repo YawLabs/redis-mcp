@@ -523,7 +523,7 @@ elif [ -f ".github/workflows/release.yml" ] && grep -q "npm publish\|NODE_AUTH_T
   # takes to surface it. Verification here is a courtesy check; warn rather
   # than fail when the mirror lags (existing memory: lag can exceed a minute).
   NPM_NOW=""
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  for i in $(seq 1 100); do
     if npm_version_live; then NPM_NOW="$VERSION"; else NPM_NOW=""; fi
     [ "$NPM_NOW" = "$VERSION" ] && break
     sleep 6
@@ -531,7 +531,7 @@ elif [ -f ".github/workflows/release.yml" ] && grep -q "npm publish\|NODE_AUTH_T
   if [ "$NPM_NOW" = "$VERSION" ]; then
     info "Published @yawlabs/redis-mcp@${VERSION} via CI Release run $RUN_ID"
   else
-    warn "CI Release run $RUN_ID succeeded but npm still does not serve @yawlabs/redis-mcp@${VERSION} after 60s. Likely registry propagation lag -- verify with 'curl -sI https://registry.npmjs.org/@yawlabs%2Fredis-mcp/${VERSION}' in a minute. Publish is authoritative on CI's exit code."
+    warn "CI Release run $RUN_ID succeeded but npm still does not serve @yawlabs/redis-mcp@${VERSION} after 600s. Likely registry propagation lag -- verify with 'curl -sI https://registry.npmjs.org/@yawlabs%2Fredis-mcp/${VERSION}' in a minute. Publish is authoritative on CI's exit code."
   fi
 else
   # Workstation IS the publisher (no CI fallback). Retry only on EOTP/EAUTH/OTP
@@ -657,7 +657,9 @@ elif ! command -v curl >/dev/null 2>&1; then
   warn "curl not found -- skipping the npm propagation wait; step 7 may 404 on a fresh publish"
 else
   PKG_NAME=$(node -p "require('./package.json').name")
-  NPM_WAIT_TIMEOUT_S=${NPM_WAIT_TIMEOUT_S:-300}
+  # 600 s: the @yawlabs/fetch-mcp 0.8.2 release (2026-09-29) spent 295 s of
+  # the 300 s this used to be waiting for npm to serve its new version.
+  NPM_WAIT_TIMEOUT_S=${NPM_WAIT_TIMEOUT_S:-600}
   NPM_WAITED_S=0
   # 5s: this is a remote read on a minutes-scale wait, so a tighter spin buys
   # nothing. (Under MSYS every `sleep` forks a process -- ~0.1s each -- which is
@@ -810,16 +812,15 @@ fi
 # =============================================================================
 step 8 "Verify"
 
-# Registry propagation can lag a few seconds after publish succeeds. Mirror the
-# CI smoke-test retry loop in release.yml (five attempts, 5s apart) instead of
-# a single sleep-then-check that flakes on a slow registry.
+# Registry propagation can lag minutes after publish succeeds, so poll up to
+# 120 times 5s apart (about 600s of sleeps, plus each read) instead of five
+# reads 5s apart: the @yawlabs/fetch-mcp 0.8.2 release (2026-09-29) spent
+# 295 s of its 300 s gate waiting for npm to serve its new version, and the
+# npm gate before the MCP Registry step only warns when it runs out.
 NPM_VERSION=""
-for i in 1 2 3 4 5; do
-  if npm_version_live; then NPM_VERSION="$VERSION"; else NPM_VERSION=""; fi
-  if [ "$NPM_VERSION" = "$VERSION" ]; then
-    break
-  fi
-  sleep 5
+for i in $(seq 1 120); do
+  if npm_version_live; then NPM_VERSION="$VERSION"; break; fi
+  if [ "$i" -lt 120 ]; then sleep 5; fi
 done
 
 if [ "$NPM_VERSION" = "$VERSION" ]; then
