@@ -184,7 +184,10 @@ export function getTlsConfig(): { rejectUnauthorized: boolean } | undefined {
  * process.
  *
  * The launcher (bin/redis-mcp.mjs) never serves on an oam below its OAM_MIN,
- * which is this same version -- a test keeps the two equal. But a host can run
+ * the release this server is verified on, which is at or above this version --
+ * a test keeps it so. This one stays at the TLS fix rather than following
+ * OAM_MIN up, so a host on a newer-than-0.15.3 oam is not refused a TLS
+ * connection that works there. But a host can run
  * dist/index.js directly under oam and skip the launcher entirely, so the
  * server checks for itself before it opens a TLS connection.
  */

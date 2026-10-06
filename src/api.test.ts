@@ -309,9 +309,13 @@ describe("TLS on an oam too old to carry it", () => {
   const poseAsOam = (version: string) =>
     Object.defineProperty(process.versions, "oam", { value: version, configurable: true, enumerable: true });
 
-  it("keeps its floor equal to the launcher's", () => {
+  it("keeps its floor at or below the launcher's", () => {
     // The launcher refuses an oam below OAM_MIN; the server refuses TLS below
-    // OAM_TLS_MIN for hosts that skip the launcher. One number, two places.
+    // OAM_TLS_MIN for hosts that skip the launcher. They used to be one number.
+    // OAM_MIN now tracks the release the server is verified on (0.18.0), while
+    // OAM_TLS_MIN stays at the release that fixed oam's TLS socket (0.15.3), so
+    // a host running dist/index.js directly on 0.15.3-0.17.x keeps TLS. The
+    // launcher's floor must never be one the server would refuse TLS on.
     const launcher = readFileSync(
       resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin", "redis-mcp.mjs"),
       "utf-8",
@@ -320,7 +324,8 @@ describe("TLS on an oam too old to carry it", () => {
       .exec(launcher)?.[1]
       ?.split(",")
       .map((n) => Number(n.trim()));
-    assert.deepEqual(floor, [...OAM_TLS_MIN]);
+    assert.equal(floor?.length, 3, "OAM_MIN must be [major, minor, patch]");
+    assert.equal(tlsRuntimeProblem(floor?.join(".")), null, `launcher floor ${floor?.join(".")} is below OAM_TLS_MIN`);
   });
 
   it("names the problem below the floor, and nothing at or above it, on Node, or on an unreadable version", () => {
