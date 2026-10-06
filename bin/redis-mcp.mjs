@@ -125,7 +125,8 @@
  * both fixes; it now refuses TLS on an oam below 0.15.3 itself, for the hosts
  * that run dist/index.js without this launcher (OAM_TLS_MIN in src/api.ts,
  * which stays at 0.15.3: it marks the TLS fix, not the release this server is
- * verified on, so it may sit below this floor but never above it). Before 0.9.0 `child_process.execFile` ran its
+ * verified on, so it may sit below this floor but never above it).
+ * Before 0.9.0 `child_process.execFile` ran its
  * arguments through a SHELL, `exec` accepted `timeout` and ignored it,
  * `spawnSync` truncated at `maxBuffer` while reporting success, and
  * `stdio: 'inherit'`/`'ignore'` both behaved as `'pipe'`. This server spawns
@@ -364,9 +365,9 @@ function runtimePlan({ mode, hostOam, sandbox }) {
  *     grant for every port on `a` -- a silent widening, where an open grant at
  *     least says so;
  *   - a port that is not a number from 1 to 65535 (`?port=`, `:0`, `70000`).
- *     Node refuses to dial one. oam through 0.17.x did not refuse, it clamped
- *     -- 70000 dialled 65535, and a TLS port 0 dialled 443 (measured on
- *     0.15.2, 0.15.3 and 0.17.0); 0.18.0 refuses as Node does (70000 throws
+ *     Node refuses to dial one. Older oam did not refuse, it clamped -- 70000
+ *     dialled 65535, and a TLS port 0 dialled 443 (measured on 0.15.2, 0.15.3
+ *     and 0.17.0); 0.18.0 refuses as Node does (70000 throws
  *     ERR_SOCKET_BAD_PORT, port 0 fails EADDRNOTAVAIL). Either way there is no
  *     port the user named that a grant could honestly pin.
  *
