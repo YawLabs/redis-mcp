@@ -318,7 +318,7 @@ fi
 if [ "$IS_CI" != "true" ] && [ "$RESUMING" != "true" ]; then
   echo ""
   echo -e "${YELLOW}About to release v${VERSION}. This will:${NC}"
-  echo "  1. Run lint + tests"
+  echo "  1. Run lint + tests + oam floor check + MCP compliance"
   echo "  2. Build"
   echo "  3. Bump version in package.json"
   echo "  4. Commit, tag, and push"
@@ -365,6 +365,33 @@ npm run build || fail "Build failed"
 npm test || fail "Tests failed"
 info "Unit tests passed"
 
+# The oam floor: `npm test` already ran the offline drift half
+# (src/oam-floor.test.ts); this adds the online half, which fails when oam has
+# published a release newer than OAM_MIN. Offline it says so and passes.
+# REDIS_MCP_ALLOW_STALE_OAM=1 is the deliberate way to release on the old floor.
+node scripts/check-oam-floor.mjs || fail "oam floor check failed -- see above. Set REDIS_MCP_ALLOW_STALE_OAM=1 to release on the old floor deliberately."
+info "oam floor is current"
+
+# MCP compliance, graded with the @yawlabs/mcp-compliance line yaw-mcp grades
+# with (pinned in devDependencies), against the published launcher under
+# REDIS_MCP_RUNTIME=node and again under oam, with REDIS_URL pointed at a local
+# RESP stub. A required-test failure or a grade below A stops the release. A leg
+# that could not run (package not installed, no oam on PATH) exits 2 and is
+# reported as a WARNING here -- never as a green step -- and
+# REDIS_MCP_SKIP_COMPLIANCE=1 is the deliberate, loudly-reported way past it.
+if [ "${REDIS_MCP_SKIP_COMPLIANCE:-}" = "1" ]; then
+  warn "REDIS_MCP_SKIP_COMPLIANCE=1 -- MCP compliance NOT checked for this release"
+else
+  # `|| status=$?`, not set +e: a bare failing command would still fire an ERR trap.
+  COMPLIANCE_STATUS=0
+  node scripts/check-compliance.mjs || COMPLIANCE_STATUS=$?
+  case "$COMPLIANCE_STATUS" in
+    0) info "MCP compliance passed (node and oam)" ;;
+    2) warn "MCP compliance only partly checked -- see the WARNING above" ;;
+    *) fail "MCP compliance failed -- see above. Set REDIS_MCP_SKIP_COMPLIANCE=1 to release without it deliberately." ;;
+  esac
+fi
+
 
 # =============================================================================
 # Step 3: Bump version
@@ -392,6 +419,35 @@ if [ -f server.json ]; then
     mv server.tmp server.json
     info "server.json synced to $VERSION"
   fi
+fi
+
+# server.json must satisfy the MCP Registry's own field limits BEFORE the bump
+# commit and tag. The registry checks them at step 7, which runs after the
+# irreversible npm publish in step 5, so a too-long description would leave the
+# version live on npm with no registry entry until a re-run. Ported from
+# yaw-mcp's release.sh guard; src/release-metadata.test.ts checks the same
+# fields on every `npm test`. Limits from the 2025-12-11 schema server.json
+# declares; lengths are CODE POINTS, which is what JSON Schema maxLength counts.
+if [ -f server.json ]; then
+  REGISTRY_FIELD_ERRS=$(node -e '
+const j = require("./server.json");
+const pkg = require("./package.json");
+const errs = [];
+const d = j.description;
+const dLen = typeof d === "string" ? [...d].length : -1;
+if (dLen < 1) errs.push("description is missing or empty (registry requires 1-100 code points)");
+else if (dLen > 100) errs.push("description is " + dLen + " code points, registry cap is 100 -- trim " + (dLen - 100));
+if (j.name !== "io.github.YawLabs/redis-mcp") errs.push("name is " + JSON.stringify(j.name) + ", expected \"io.github.YawLabs/redis-mcp\"");
+else if (!/^[a-zA-Z0-9.-]+\/[a-zA-Z0-9._-]+$/.test(j.name)) errs.push("name does not match the registry pattern");
+const p0 = (j.packages || [])[0] || {};
+if (p0.identifier !== pkg.name) errs.push("packages[0].identifier is " + JSON.stringify(p0.identifier) + ", package.json name is " + JSON.stringify(pkg.name));
+if (!p0.transport || p0.transport.type !== "stdio") errs.push("packages[0].transport.type must be \"stdio\"");
+console.log(errs.join("; "));
+') || fail "Could not read server.json to check the MCP Registry field limits -- is it valid JSON?"
+  if [ -n "$REGISTRY_FIELD_ERRS" ]; then
+    fail "server.json violates the MCP Registry schema: ${REGISTRY_FIELD_ERRS}. Fix it before releasing -- step 7 would otherwise refuse it AFTER step 5's npm publish."
+  fi
+  info "server.json passes the MCP Registry field limits"
 fi
 
 # Promote the heading BEFORE the bump commit, so the rewrite is committed

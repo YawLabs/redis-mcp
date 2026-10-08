@@ -59,8 +59,11 @@ function getRedisUrl(): string {
   if (!url || url.trim() === "") {
     const hint =
       process.platform === "win32"
-        ? " On Windows, env vars set in bash/WSL profiles are not visible to MCP servers launched via cmd." +
-          ' Add "env": {"REDIS_URL": "redis://..."} to your .mcp.json.'
+        ? // File-neutral on purpose: this line reaches users of every MCP client,
+          // and under yaw-mcp it is followed by a pointer to the bundles.json
+          // that defines the server -- naming .mcp.json here contradicted it.
+          " On Windows, env vars set in bash/WSL profiles are not visible to MCP servers launched via cmd." +
+          " Put REDIS_URL in the env block of the MCP client config that launches this server."
         : "";
     throw new Error(`REDIS_URL is not set. Provide a Redis connection string.${hint}`);
   }
@@ -70,7 +73,7 @@ function getRedisUrl(): string {
 /**
  * Eagerly validate required configuration at startup. Calls getRedisUrl() purely
  * for its throw-on-missing behavior so the launcher can surface the missing-URL
- * error (and the Windows .mcp.json hint) in startup logs, instead of deferring it
+ * error (and the Windows env-block hint) in startup logs, instead of deferring it
  * to the first tool call. Only env validation runs here; the TCP connect stays
  * lazy inside getClient().
  */
@@ -209,7 +212,7 @@ export function tlsRuntimeProblem(oamVersion: string | undefined = process.versi
   if (atOrAbove) return null;
   return (
     `TLS (rediss://) needs oam ${OAM_TLS_MIN.join(".")} or newer, and this server is running on oam ${oamVersion}, ` +
-    "whose TLS socket crashes the Redis client (YawLabs/oam#132). Update oam (https://oamjs.org), " +
+    "whose TLS socket crashes the Redis client (YawLabs/oam#132). Run `oam self-update` (or install from https://oamjs.org), " +
     "or run the server on Node -- the redis-mcp launcher does that for you."
   );
 }

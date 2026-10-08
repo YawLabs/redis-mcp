@@ -17,6 +17,7 @@ import {
   runCommand,
   shutdown,
   tlsRuntimeProblem,
+  validateConfig,
   wouldUseTls,
 } from "./api.js";
 
@@ -410,5 +411,33 @@ describe("TLS on an oam too old to carry it", () => {
     } finally {
       console.error = original;
     }
+  });
+});
+
+describe("validateConfig with REDIS_URL unset", () => {
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env.REDIS_URL;
+    delete process.env.REDIS_URL;
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = saved;
+  });
+
+  it("names the variable, and on Windows a file-neutral remedy rather than .mcp.json", () => {
+    // Under yaw-mcp this line is followed by a pointer to the bundles.json
+    // that defines the server; naming .mcp.json here contradicted it.
+    assert.throws(validateConfig, (err: Error) => {
+      assert.match(err.message, /^REDIS_URL is not set\./);
+      assert.doesNotMatch(err.message, /\.mcp\.json|bundles\.json/);
+      if (process.platform === "win32") {
+        assert.match(
+          err.message,
+          /Put REDIS_URL in the env block of the MCP client config that launches this server\.$/,
+        );
+      }
+      return true;
+    });
   });
 });

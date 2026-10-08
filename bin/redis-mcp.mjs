@@ -29,9 +29,9 @@
  *
  * WHICH OAM
  * OAM_BIN, when set and usable, is used as given. Otherwise every oam binary
- * discovery can see -- the installed locations, then PATH -- is asked for its
- * version, and the NEWEST one at or above the floor wins; a tie keeps search
- * order. Taking the first binary found instead let a stale copy early in the
+ * discovery can see -- OAM_INSTALL_DIR, the installed locations, then PATH --
+ * is asked for its version, and the NEWEST one at or above the floor wins; a
+ * tie keeps search order. Taking the first binary found instead let a stale copy early in the
  * search order hide a current one later: with oam 0.9.0 installed in ~/.oam/bin
  * and 0.15.2 on PATH, the launcher bound to 0.9.0 because installed locations
  * are searched first.
@@ -64,6 +64,10 @@
  * A host oam BELOW the floor never serves. It used to, whenever discovery came
  * up empty. It now hands the server off to the newest usable oam, or to Node
  * found on PATH, or exits with an error when there is neither.
+ *
+ * A spawn from an oam host also gets NODE_OPTIONS with any inherited
+ * `--permission` / `--allow-*` taken out (oam 0.18.0 appends its own
+ * permission flags to every child's NODE_OPTIONS); see childEnv.
  *
  * A spawn from an oam host PIPES stdio rather than inheriting it. Before 0.9.0
  * oam treated `stdio: 'inherit'` as `'pipe'`, so an inherited handoff from such
@@ -104,10 +108,13 @@
  * postgres-mcp: the one endpoint it may reach is the one it was pointed at, with
  * host and port both pinned: a grant naming only a host admits every port on a
  * hostname or IPv4 address, and nothing at all on an IPv6 literal. Filesystem
- * and child-process stay denied. When REDIS_URL names no single TCP endpoint
- * the grant can spell -- a unix socket path, a URL that does not parse, an
- * empty host, a host with a comma in it, a port outside 1-65535 -- the grant is
- * left open and the launcher says so.
+ * and child-process stay denied. An absolute unix socket path is pinned as
+ * that exact path, plus fs read and write on it alone, which is what oam
+ * 0.18.0 asks of a socket that is a file. When REDIS_URL names no single
+ * endpoint the grant can spell -- a URL that does not parse, an empty host, a
+ * host with a comma in it, a port outside 1-65535 -- the grant is left open
+ * and the launcher says so; a relative socket path cannot be granted at all,
+ * and the launcher says the sandbox will refuse it.
  *
  * Opt-in, not default: a denied environment variable is ABSENT from process.env
  * rather than throwing, so an under-granted REDIS_URL reads as "not configured".
@@ -116,6 +123,12 @@
  * MINIMUM OAM VERSION
  * The latest oam release, 0.18.0 -- bump OAM_MIN when oam ships a newer one.
  * Only the current oam is used and verified; an older one is passed over.
+ * Every remedy for an oam that works but is too old names `oam self-update`,
+ * oam's native, signature-verified update path since 0.18.0. A binary older
+ * than 0.18.0 running self-update still takes the old path -- it pipes the
+ * current installer -- and that installer now verifies the signed release, so
+ * it needs ssh-keygen 8.1 or later (macOS and Linux ship one; on Windows it is
+ * the inbox OpenSSH client). oamjs.org is named only when no oam was found.
  * The floor is not cosmetic. Through 0.15.2 oam's `tls.TLSSocket` lacked the
  * `net.Socket` members ioredis calls (`setNoDelay`, `setKeepAlive`,
  * `setTimeout`, `connecting`) and never closed after the server hung up, so a
@@ -150,7 +163,7 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { constants, homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -192,7 +205,10 @@ function pathKey(p) {
  * usually has oam/target/release on PATH, and cargo replaces that binary
  * underneath running processes. Both forms are checked on Windows: the
  * installer defaults to %LOCALAPPDATA%\oam\bin there, but oam's docs name
- * ~/.oam/bin first and OAM_INSTALL_DIR can pick either.
+ * ~/.oam/bin first. OAM_INSTALL_DIR, when set, is searched first of all: it is
+ * where oam's installer and `oam self-update` put the binary (oam
+ * docs/cli-reference.md), so an oam installed to a custom directory and not on
+ * PATH is still found.
  *
  * PATH is resolved manually rather than by spawning `which`/`where`, which
  * would cost a subprocess on every launch just to list candidates.
@@ -209,6 +225,7 @@ function discoverOamPaths() {
   if (isWin) {
     installed.unshift(join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "oam", "bin", exe));
   }
+  if (process.env.OAM_INSTALL_DIR) installed.unshift(join(process.env.OAM_INSTALL_DIR, exe));
   const onPath = (process.env.PATH ?? "")
     .split(delimiter)
     .filter(Boolean)
@@ -310,7 +327,9 @@ function runtimePlan({ mode, hostOam, sandbox }) {
 /**
  * The `--allow-net` flag that pins the sandbox to the endpoint in `dsn`
  * (REDIS_URL), and, when it cannot be pinned, why: `{ flag, open }`, where
- * `open` is null for a pinned grant and a short reason for an open one.
+ * `open` is null for a pinned grant and a short reason for an open one. A
+ * pinned unix socket also carries `socket` (the path, for the fs grants), and
+ * an open grant the sandbox will refuse anyway carries `refused: true`.
  *
  * Derived, not hardcoded: the only endpoint this server may reach is the one it
  * was configured to reach. oam (0.15.0 and later) matches a socket grant that
@@ -353,10 +372,32 @@ function runtimePlan({ mode, hostOam, sandbox }) {
  * to resolve in the IPv6 case, because the match is a whole-string comparison,
  * not a parse.
  *
- * What is left gets a bare `--allow-net` rather than a guessed narrow one, and
- * the caller reports that the sandbox's network is open:
+ * A unix socket path is pinned too, since oam 0.18.0 dials one (net over pipes,
+ * oam #219; oam docs/node-divergences.md entry 50). Under `--permission` a pipe
+ * is a net resource named by its path, granted only by unrestricted
+ * `--allow-net` or by an entry that is EXACTLY that path -- never by a host
+ * entry or a prefix -- and a socket that is a file (every Unix socket) also
+ * needs `--allow-fs-read` and `--allow-fs-write` for that path. So an absolute
+ * path ioredis would dial is returned as `{ flag: "--allow-net=<path>", open:
+ * null, socket: <path> }`, and sandboxFlags adds the two fs grants for
+ * `socket`. The path is the one ioredis dials: everything before `?` for a DSN
+ * starting with `/`, the WHATWG pathname of a scheme-less DSN (`host/2` dials
+ * `/2`, percent-encoding and all), else the last `path` in the query string.
+ * Up to 0.17.1 oam had no pipe client at all, so a socket REDIS_URL never
+ * connected on oam whatever the grant said. oam's changelog calls the Unix
+ * half of pipes untested off Windows so far; the grant follows its documented
+ * rule, not a Linux/macOS measurement.
  *
- *   - a unix socket path, which is not a network endpoint at all;
+ * What is left gets a bare `--allow-net` rather than a guessed narrow one, and
+ * the caller reports that the sandbox's network is open -- or, for a socket
+ * path no grant can name, that the sandbox will refuse it (`refused: true`):
+ *
+ *   - a RELATIVE unix socket path (`?path=redis.sock`): no grant entry can
+ *     match it, and with no fs grant for it the dial is refused anyway;
+ *   - a socket path oam's grant list cannot spell (a comma, or whitespace at
+ *     either end -- oam splits a grant on commas and trims each entry), or
+ *     one ending in `/`, which names a directory: an fs grant on a directory
+ *     covers everything under it, and on `/` that is the whole filesystem;
  *   - a DSN WHATWG rejects (`redis://[::1`), which ioredis rejects the same way;
  *   - an empty host (`?host=`): ioredis passes `""` to net.connect, and which
  *     address that becomes is up to the runtime, not something to encode here;
@@ -377,7 +418,20 @@ function runtimePlan({ mode, hostOam, sandbox }) {
  */
 function netGrant(dsn) {
   const open = (reason) => ({ flag: "--allow-net", open: reason });
-  const socketPath = () => open("REDIS_URL names a unix socket path, not a host");
+  const socketPath = (path) => {
+    if (!path.startsWith("/")) {
+      return { ...open("REDIS_URL names a relative unix socket path, which no sandbox grant can name"), refused: true };
+    }
+    // A path ending in `/` names a directory, and an fs grant on a directory
+    // covers everything under it -- `/` would be the whole filesystem.
+    if (path.endsWith("/")) {
+      return { ...open("REDIS_URL names a directory, not a unix socket path"), refused: true };
+    }
+    if (path.includes(",") || path !== path.trim()) {
+      return { ...open("REDIS_URL names a unix socket path the sandbox's grants cannot express"), refused: true };
+    }
+    return { flag: `--allow-net=${path}`, open: null, socket: path };
+  };
   if (!dsn || dsn.trim() === "") return open("REDIS_URL is not set");
   // ioredis's isInt: anything Number() reads as an integer, whitespace and
   // sign included, is a port on localhost.
@@ -385,7 +439,10 @@ function netGrant(dsn) {
   if (!Number.isNaN(Number(dsn)) && (asNumber | 0) === asNumber) {
     return pinned("localhost", dsn);
   }
-  if (dsn.startsWith("/")) return socketPath();
+  if (dsn.startsWith("/")) {
+    const q = dsn.indexOf("?");
+    return socketPath(q === -1 ? dsn : dsn.slice(0, q));
+  }
   const hasScheme = /^rediss?:\/\//i.test(dsn);
   let url;
   try {
@@ -395,11 +452,12 @@ function netGrant(dsn) {
   }
   // Only a scheme-less DSN's pathname is a socket path; on `redis://` it is
   // the db number.
-  if (!hasScheme && url.pathname && url.pathname !== "/") return socketPath();
+  if (!hasScheme && url.pathname && url.pathname !== "/") return socketPath(url.pathname);
   // The last value of a query key, or undefined when the key is absent. An
   // empty value stays "", because ioredis keeps it.
   const query = (key) => url.searchParams.getAll(key).at(-1);
-  if (query("path")) return socketPath();
+  const queryPath = query("path");
+  if (queryPath) return socketPath(queryPath);
   const queryHost = query("host");
   if (!url.hostname && queryHost === "") return open("REDIS_URL names an empty host");
   const host = url.hostname ? url.hostname.replace(/^\[|\]$/g, "") : (queryHost ?? "localhost");
@@ -414,6 +472,15 @@ function netGrant(dsn) {
       return open("REDIS_URL names a port that is not a number from 1 to 65535");
     }
     return { flag: `--allow-net=${host}:${port}`, open: null };
+  }
+}
+
+/** True when `path` exists and is a directory. Stat-only. */
+function isDirectory(path) {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
   }
 }
 
@@ -432,11 +499,20 @@ function netGrant(dsn) {
 function sandboxFlags() {
   if (process.env.REDIS_MCP_SANDBOX !== "1") return [];
 
-  const netFlag = netGrant(process.env.REDIS_URL).flag;
+  const grant = netGrant(process.env.REDIS_URL);
 
   const env = ["ALLOW_WRITES","DEBUG","REDIS_COMMAND_TIMEOUT_MS","REDIS_CONNECT_TIMEOUT_MS","REDIS_MAX_KEYS","REDIS_MAX_VALUE_BYTES","REDIS_SCAN_COUNT","REDIS_TLS_REJECT_UNAUTHORIZED","REDIS_URL"];
 
-  const flags = ["--permission", netFlag, `--allow-env=${env.join(",")}`];
+  const flags = ["--permission", grant.flag, `--allow-env=${env.join(",")}`];
+  // A unix socket is a file: oam 0.18.0 wants fs read AND write on that exact
+  // path as well as the net grant (see netGrant). Nothing else on the
+  // filesystem is granted.
+  // A path that turns out to be a directory on disk gets no fs grant: an fs
+  // grant on a directory covers its whole subtree, and a directory cannot be
+  // dialled anyway, so the sandbox refuses the connection instead.
+  if (grant.socket && !isDirectory(grant.socket)) {
+    flags.push(`--allow-fs-read=${grant.socket}`, `--allow-fs-write=${grant.socket}`);
+  }
   return flags;
 }
 
@@ -494,7 +570,16 @@ function findNodeOnPath() {
   return null;
 }
 
-/** Why a candidate was passed over, for stderr. */
+/**
+ * Why a candidate was passed over, for stderr.
+ *
+ * Two different causes, and they need different remedies. A null `version` is
+ * NOT "old": oamVersion returns null when the binary could not be run at all
+ * (not executable, wrong arch, wedged, deleted between the stat and the probe)
+ * or when its --version output did not parse. Telling that user to
+ * `oam self-update` sends them after the one cause it definitely is not, so the
+ * wording splits here, and so does the remedy in `remedyFor`.
+ */
 function unusableReason(path, version, label = path) {
   const min = OAM_MIN.join(".");
   return version
@@ -525,26 +610,34 @@ function hostOamBinary() {
  * stderr notes: `overrideNote` about an unusable OAM_BIN, and `skipped`
  * describing what was found and rejected when nothing was usable. `outdated`
  * is true when anything rejected was a working oam that is merely below the
- * floor -- the case an update fixes.
+ * floor -- the case an update fixes. `passedOver` is the `version` of every
+ * existing binary rejected (OAM_BIN included, null for one that would not
+ * run) and `overrideMissing` says OAM_BIN named a path that does not exist, so
+ * a hard failure can name the right remedy (see remedyFor).
  */
 function chooseOam() {
   const override = process.env.OAM_BIN;
   let overrideNote = null;
-  let outdated = false;
+  let overrideMissing = false;
+  const passedOver = [];
   if (override) {
     if (!existsSync(override)) {
       overrideNote = `OAM_BIN=${override} does not exist`;
+      overrideMissing = true;
     } else {
       const version = oamVersion(override);
       if (atLeast(version, OAM_MIN)) {
-        return { chosen: { path: override, version }, overrideNote, skipped: [], outdated };
+        const chosen = { path: override, version };
+        return { chosen, overrideNote, skipped: [], outdated: false, passedOver, overrideMissing };
       }
       overrideNote = unusableReason(override, version, `OAM_BIN=${override}`);
-      outdated ||= version !== null;
+      passedOver.push(version);
     }
   }
   const host = hostOamBinary();
-  if (host.chosen) return { chosen: host.chosen, overrideNote, skipped: [], outdated };
+  if (host.chosen) {
+    return { chosen: host.chosen, overrideNote, skipped: [], outdated: false, passedOver, overrideMissing };
+  }
   // Neither the OAM_BIN nor the host binary is probed twice: each has already
   // been judged, and noted.
   const judged = new Set([override, host.path].filter(Boolean).map(pathKey));
@@ -553,8 +646,37 @@ function chooseOam() {
     .map((path) => ({ path, version: oamVersion(path) }));
   const chosen = pickNewest(candidates);
   const skipped = chosen ? [] : [...host.skipped, ...candidates.map((c) => unusableReason(c.path, c.version))];
-  if (!chosen) outdated ||= candidates.some((c) => c.version !== null);
-  return { chosen, overrideNote, skipped, outdated };
+  if (!chosen) passedOver.push(...candidates.map((c) => c.version));
+  const outdated = passedOver.some((v) => v !== null);
+  return { chosen, overrideNote, skipped, outdated, passedOver, overrideMissing };
+}
+
+/**
+ * The environment for a child of THIS process, with oam's inherited permission
+ * flags taken out of NODE_OPTIONS.
+ *
+ * Since 0.18.0 oam puts `--permission` / `--allow-*` into a child's
+ * NODE_OPTIONS, for any program, and a process started under them hands them
+ * on through its environment. Any such flag in this launcher's NODE_OPTIONS was
+ * inherited from whatever started it -- the sandbox this launcher applies is
+ * passed on the spawned oam's ARGV (sandboxFlags), never through the
+ * environment -- so passing it on would put the server, Node after a handoff
+ * or a fresh oam, under a sandbox it was never configured for, or a second,
+ * different one beside REDIS_MCP_SANDBOX's. Only on an oam host: on Node,
+ * NODE_OPTIONS is the operator's own and is passed untouched.
+ *
+ * This scrubs the ENVIRONMENT only. An oam host whose own execArgv carries the
+ * flags re-appends them at spawn; nothing a script does can undo that.
+ */
+function childEnv(env = process.env, hostOam = process.versions.oam) {
+  if (hostOam === undefined || !env.NODE_OPTIONS) return env;
+  const kept = env.NODE_OPTIONS.split(/\s+/).filter(
+    (token) => token && !/^--(?:permission|experimental-permission|allow-[a-z0-9-]+)(?:=.*)?$/.test(token),
+  );
+  const next = { ...env };
+  if (kept.length > 0) next.NODE_OPTIONS = kept.join(" ");
+  else delete next.NODE_OPTIONS;
+  return next;
 }
 
 /** Run the server in THIS process. The zero-overhead fallback. */
@@ -604,7 +726,7 @@ async function launchChild(cmd, args, onLaunchFailed) {
       // server's shutdown path. Piping preserves both as well: bytes are copied
       // unchanged, and stdin's end propagates to the child.
       stdio: piped ? ["pipe", "pipe", "pipe"] : "inherit",
-      env: process.env,
+      env: childEnv(),
       windowsHide: true,
     });
   } catch (err) {
@@ -765,8 +887,42 @@ function withAction(note, hostOam) {
   return action ? `${note}; ${action}` : note;
 }
 
-/** The remedy for a working oam that is only too old, for stderr. */
-const UPDATE_OAM = `update oam from https://oamjs.org to use it (${OAM_MIN.join(".")} or newer)`;
+/**
+ * The remedy for a working oam that is only too old, for a one-line stderr
+ * note. `oam self-update` is the native, signature-verified update path since
+ * oam 0.18.0, and the one the no-Node handoff message names too; the website
+ * is for a box with no oam at all (see remedyFor). See MINIMUM OAM VERSION for
+ * what self-update needs when it starts from an oam older than 0.18.0.
+ */
+const UPDATE_OAM = `run \`oam self-update\` to get oam ${OAM_MIN.join(".")} or newer`;
+
+/**
+ * What would fix "no usable oam" under REDIS_MCP_RUNTIME=oam, one line per
+ * cause that was actually seen -- ported from ssh-mcp's remedyFor, with
+ * aws-mcp's linux-arm64 branch. `platform`/`arch` are parameters so that
+ * branch is testable.
+ *
+ * An outdated oam needs `oam self-update`; one that would not run needs
+ * checking, and self-update will not help it; a missing OAM_BIN needs
+ * pointing somewhere real. Only when none of those was seen (and no Windows
+ * .cmd/.bat shim, which has its own note) is installing the remedy -- and oam
+ * publishes no linux-arm64 build, so there that remedy is not offered.
+ */
+function remedyFor({ passedOver, overrideMissing, shim, platform = process.platform, arch = process.arch }) {
+  const lines = [];
+  if (passedOver.some((v) => v !== null)) lines.push(`Run \`oam self-update\` to get oam ${OAM_MIN.join(".")} or newer.\n`);
+  if (passedOver.some((v) => v === null)) lines.push("Check that it is an executable oam binary for this platform.\n");
+  if (overrideMissing) lines.push("Point OAM_BIN at an existing oam binary, or unset it.\n");
+  if (lines.length === 0 && !shim) {
+    lines.push(
+      platform === "linux" && arch !== "x64"
+        ? `oam publishes no build for linux-${arch}, so there is nothing to install here: set OAM_BIN=/path/to/oam if you built one yourself.\n`
+        : "Install oam from https://oamjs.org, or set OAM_BIN=/path/to/oam.\n",
+    );
+  }
+  lines.push("Or use REDIS_MCP_RUNTIME=node to run on Node.\n");
+  return lines.join("");
+}
 
 /**
  * No usable oam, under a mode that allows falling back: in THIS process on a
@@ -796,7 +952,7 @@ if (plan === "in-process") {
   const belowFloor = !atLeast(parseVersion(hostOam), OAM_MIN);
   await handOffToNode(belowFloor ? `this process is oam ${hostOam}, older than ${OAM_MIN.join(".")}` : "");
 } else {
-  const { chosen, overrideNote, skipped, outdated } = chooseOam();
+  const { chosen, overrideNote, skipped, outdated, passedOver, overrideMissing } = chooseOam();
 
   if (chosen) {
     if (overrideNote) {
@@ -809,7 +965,9 @@ if (plan === "in-process") {
     const grant = netGrant(process.env.REDIS_URL);
     if (sandboxFlags().length > 0 && grant.open && process.env.REDIS_URL?.trim()) {
       await errSync(
-        `redis-mcp: REDIS_MCP_SANDBOX=1, but ${grant.open}, so the sandbox cannot pin its network grant to the Redis endpoint and leaves network access open.\n`,
+        grant.refused
+          ? `redis-mcp: REDIS_MCP_SANDBOX=1, but ${grant.open}, so the sandbox will refuse the connection; use an absolute socket path, or a host and port.\n`
+          : `redis-mcp: REDIS_MCP_SANDBOX=1, but ${grant.open}, so the sandbox cannot pin its network grant to the Redis endpoint and leaves network access open.\n`,
       );
     }
     // `--` separates oam's own flags from the script's argv, so `redis-mcp
@@ -840,7 +998,7 @@ if (plan === "in-process") {
       await errSync(
         `redis-mcp: REDIS_MCP_RUNTIME=oam but no usable oam (${OAM_MIN.join(".")} or newer) was found.\n` +
           notes.map((note) => `  ${note}\n`).join("") +
-          "Install or update from https://oamjs.org, set OAM_BIN=/path/to/oam, or use REDIS_MCP_RUNTIME=node.\n",
+          remedyFor({ passedOver, overrideMissing, shim }),
       );
       process.exit(1);
     }
