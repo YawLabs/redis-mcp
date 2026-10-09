@@ -95,7 +95,7 @@ export function makeSelfSignedCert(): { key: string; cert: string } {
 /* ---------- a TLS server that answers RESP ---------- */
 
 /** Split complete RESP arrays of bulk strings off the front of `buf`. */
-function takeCommands(buf: string): { commands: string[][]; rest: string } {
+export function takeCommands(buf: string): { commands: string[][]; rest: string } {
   const commands: string[][] = [];
   let rest = buf;
   for (;;) {

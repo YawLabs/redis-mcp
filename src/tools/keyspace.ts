@@ -88,7 +88,9 @@ export const keyspaceTools = [
       "windowed by `limit`); set -> member array; zset -> [member, score] pairs (ZRANGE " +
       "WITHSCORES, windowed); stream -> recent entries (XREVRANGE, windowed). Collection reads " +
       "are capped at `limit` (default REDIS_MAX_KEYS) so a million-element list can't blow out " +
-      "context. Always read-only.",
+      "context. The size and `truncated` fields come before the payload, so a host that caps tool " +
+      "results below REDIS_MAX_VALUE_BYTES (Yaw MCP: 100,000 bytes by default) cuts payload, not them. " +
+      "Always read-only.",
     annotations: {
       title: "Read a key's value (type-aware)",
       readOnlyHint: true,
@@ -116,6 +118,11 @@ export const keyspaceTools = [
           return { ok: true, data: { key, exists: false } };
         }
 
+        // Every branch puts the size and `truncated` BEFORE the payload. A host
+        // that caps a tool result keeps the head of the text and cuts the
+        // tail -- Yaw MCP at 100,000 bytes by default, below the 256 KiB
+        // REDIS_MAX_VALUE_BYTES default -- so the payload must be what it
+        // cuts, not the fields that say the value was cut.
         switch (type) {
           case "string": {
             // Window the value so a multi-megabyte string can't blow out the
@@ -125,7 +132,7 @@ export const keyspaceTools = [
             // multi-byte UTF-8 char at the boundary -- acceptable for a preview.
             const maxBytes = getMaxValueBytes();
             const [byteLength, value] = await Promise.all([client.strlen(key), client.getrange(key, 0, maxBytes - 1)]);
-            return { ok: true, data: { key, type, value, length: byteLength, truncated: byteLength > maxBytes } };
+            return { ok: true, data: { key, type, length: byteLength, truncated: byteLength > maxBytes, value } };
           }
           case "hash": {
             const total = await client.hlen(key);
@@ -143,13 +150,13 @@ export const keyspaceTools = [
                 count++;
               }
             } while (cur !== "0" && count < cap);
-            return { ok: true, data: { key, type, field_count: total, fields, truncated: total > count } };
+            return { ok: true, data: { key, type, field_count: total, truncated: total > count, fields } };
           }
           case "list": {
             const total = await client.llen(key);
             // LRANGE end index is inclusive, so cap-1.
             const values = await client.lrange(key, 0, cap - 1);
-            return { ok: true, data: { key, type, length: total, values, truncated: total > values.length } };
+            return { ok: true, data: { key, type, length: total, truncated: total > values.length, values } };
           }
           case "set": {
             const total = await client.scard(key);
@@ -164,7 +171,7 @@ export const keyspaceTools = [
                 members.push(m);
               }
             } while (cur !== "0" && members.length < cap);
-            return { ok: true, data: { key, type, cardinality: total, members, truncated: total > members.length } };
+            return { ok: true, data: { key, type, cardinality: total, truncated: total > members.length, members } };
           }
           case "zset": {
             const total = await client.zcard(key);
@@ -175,7 +182,7 @@ export const keyspaceTools = [
             }
             return {
               ok: true,
-              data: { key, type, cardinality: total, members: pairs, truncated: total > pairs.length },
+              data: { key, type, cardinality: total, truncated: total > pairs.length, members: pairs },
             };
           }
           case "stream": {
@@ -183,7 +190,7 @@ export const keyspaceTools = [
             // XREVRANGE returns newest first; cap with COUNT.
             const entries = (await client.call("XREVRANGE", key, "+", "-", "COUNT", String(cap))) as unknown;
             const entryCount = Array.isArray(entries) ? entries.length : 0;
-            return { ok: true, data: { key, type, length: total, entries, truncated: total > entryCount } };
+            return { ok: true, data: { key, type, length: total, truncated: total > entryCount, entries } };
           }
           default:
             return { ok: false, error: `Unsupported key type: ${type}` };

@@ -67,6 +67,39 @@ describe("release metadata", () => {
   });
 });
 
+describe("server.json against the MCP Registry's field limits", () => {
+  // The registry checks these at publish (step 7 of release.sh), which runs
+  // AFTER the irreversible npm publish in step 5: a violation leaves the
+  // version live on npm with no registry entry until a re-run. The numbers come
+  // from the 2025-12-11 schema server.json declares; lengths are CODE POINTS,
+  // which is what JSON Schema maxLength counts. release.sh runs the same check
+  // in step 3, before the bump commit and tag. Ported from yaw-mcp's release.sh
+  // guard.
+  const pkg = readJson("package.json");
+  const server = readJson("server.json");
+
+  it("has a 1-100 code point description", () => {
+    const length = typeof server.description === "string" ? [...server.description].length : -1;
+    assert.ok(
+      length >= 1 && length <= 100,
+      `server.json description is ${length} code points; the registry allows 1-100`,
+    );
+  });
+
+  it("has the registry name this repo publishes under, in the registry's pattern", () => {
+    assert.equal(server.name, "io.github.YawLabs/redis-mcp");
+    assert.match(String(server.name), /^[a-zA-Z0-9.-]+\/[a-zA-Z0-9._-]+$/);
+    const length = [...String(server.name)].length;
+    assert.ok(length >= 3 && length <= 200, `name is ${length} code points; the registry allows 3-200`);
+  });
+
+  it("declares the npm package by its package.json name, over stdio", () => {
+    const packages = server.packages as Array<{ identifier?: string; transport?: { type?: string } }>;
+    assert.equal(packages[0]?.identifier, pkg.name);
+    assert.equal(packages[0]?.transport?.type, "stdio");
+  });
+});
+
 describe("release.sh MCP Registry calls", () => {
   const releaseSh = readFileSync(resolve(repoRoot, "release.sh"), "utf-8");
 
