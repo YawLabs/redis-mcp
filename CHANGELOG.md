@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-10-11
+
+### Changed
+- Maintenance release; no changes since v0.5.3.
+
 ## [0.5.3] — 2026-10-06
 
 ### Security

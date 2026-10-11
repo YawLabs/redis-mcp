@@ -9,12 +9,12 @@
     "id": "1257730641"
   },
   "websiteUrl": "https://yaw.sh/mcp-servers/redis-mcp/",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@yawlabs/redis-mcp",
-      "version": "0.5.3",
+      "version": "0.5.4",
       "transport": {
         "type": "stdio"
       }
