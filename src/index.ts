@@ -5,6 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { isWritesAllowed, shutdown, tlsRuntimeProblem, validateConfig, wouldUseTls } from "./api.js";
 import { toMcpResponse } from "./mcp-response.js";
+import { SERVER_INSTRUCTIONS } from "./server-instructions.js";
 import { advisorTools } from "./tools/advisor.js";
 import { healthTools } from "./tools/health.js";
 import { keyspaceTools } from "./tools/keyspace.js";
@@ -37,10 +38,15 @@ if (subcommand === "version" || subcommand === "--version") {
 
 const allTools = [...scanTools, ...keyspaceTools, ...healthTools, ...advisorTools];
 
-const server = new McpServer({
-  name: "@yawlabs/redis-mcp",
-  version,
-});
+// `instructions` is routing guidance a host shows once per session (yaw-mcp
+// renders it in its activate/dispatch reply); see src/server-instructions.ts.
+const server = new McpServer(
+  {
+    name: "@yawlabs/redis-mcp",
+    version,
+  },
+  { instructions: SERVER_INSTRUCTIONS },
+);
 
 for (const tool of allTools) {
   server.tool(
@@ -61,7 +67,7 @@ for (const tool of allTools) {
 }
 
 // Validate required config eagerly so a missing REDIS_URL (and the Windows
-// .mcp.json hint) surfaces in startup logs and exits, instead of deferring the
+// env-block hint) surfaces in startup logs and exits, instead of deferring the
 // error to the first tool call. Only env validation runs here; the TCP connect
 // stays lazy inside getClient().
 try {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -20,7 +20,23 @@ type Plan = "in-process" | "discover" | "handoff-node";
 type RuntimePlan = (ctx: { mode: string; hostOam: string | undefined; sandbox: boolean }) => Plan;
 type Candidate = { path: string; version: number[] | null };
 type PickNewest = (candidates: Candidate[]) => Candidate | null;
-type NetGrant = (dsn: string | undefined) => { flag: string; open: string | null };
+type NetGrant = (dsn: string | undefined) => {
+  flag: string;
+  open: string | null;
+  socket?: string;
+  refused?: boolean;
+};
+type RemedyFor = (ctx: {
+  passedOver: (number[] | null)[];
+  overrideMissing: boolean;
+  shim: string | null;
+  platform?: string;
+  arch?: string;
+}) => string;
+type ChildEnv = (
+  env: Record<string, string | undefined>,
+  hostOam: string | undefined,
+) => Record<string, string | undefined>;
 
 /** Pull named declarations out of the launcher source, loudly. */
 function extract(patterns: RegExp[]): string {
@@ -242,16 +258,6 @@ describe("launcher netGrant()", () => {
       [undefined, /not set/],
       ["", /not set/],
       ["  ", /not set/],
-      ["/tmp/redis.sock", /unix socket path/],
-      ["/tmp/redis.sock?db=2", /unix socket path/],
-      // A bare "/" is a socket path to ioredis too, not a host-less URL.
-      ["/", /unix socket path/],
-      ["/?port=1", /unix socket path/],
-      // A pathname on a scheme-less DSN is a socket path to ioredis, not a db.
-      ["127.0.0.1:6391/2", /unix socket path/],
-      // ioredis takes a non-empty `path` from the query and ignores host and port.
-      ["redis://h?path=/tmp/redis.sock", /unix socket path/],
-      ["127.0.0.1:6379?path=/tmp/redis.sock", /unix socket path/],
       ["redis://[::1", /not a URL this launcher can parse/],
       ["redis://hunter2:[::1", /not a URL this launcher can parse/],
       // ioredis keeps an empty query host as "": which address that is belongs
@@ -275,6 +281,7 @@ describe("launcher netGrant()", () => {
     for (const [dsn, reason] of cases) {
       const grant = netGrant(dsn);
       assert.equal(grant.flag, "--allow-net", JSON.stringify(dsn));
+      assert.equal(grant.refused, undefined, `${JSON.stringify(dsn)} opens the network rather than being refused`);
       assert.match(grant.open ?? "", reason, JSON.stringify(dsn));
       assert.doesNotMatch(
         grant.open ?? "",
@@ -284,23 +291,61 @@ describe("launcher netGrant()", () => {
     }
   });
 
-  it("leaves the grant open exactly where ioredis would dial a unix socket", () => {
-    // The socket side of the parity check below: every DSN a real client
-    // resolves to a `path` gets the open grant, and says why.
-    for (const dsn of [
+  it("pins exactly the unix socket path ioredis dials, and refuses one no grant can name", () => {
+    // The socket side of the parity check below. oam 0.18.0 dials a pipe, and
+    // under --permission grants it only for unrestricted --allow-net or an
+    // entry EXACTLY equal to the path (plus fs read/write on it, which
+    // sandboxFlags adds for `socket`). This used to hand every socket DSN a
+    // bare --allow-net and no fs grant, and say the network was open -- while
+    // oam refused the dial for want of the fs grant. The expected path comes
+    // from a real client's resolved options, so the two parsers cannot drift.
+    const pinned = [
       "/tmp/redis.sock",
       "/tmp/redis.sock?db=2",
-      "/",
-      "/?port=1",
+      // ioredis takes the part before `?` and ignores a query `path`.
+      "/tmp/redis.sock?path=/elsewhere.sock",
+      // A pathname on a scheme-less DSN is a socket path to ioredis, not a db.
       "127.0.0.1:6391/2",
       "host/2",
+      // WHATWG percent-encodes it, and ioredis dials it encoded.
+      "host/a b.sock",
+      // ioredis takes a non-empty `path` from the query and ignores host and port.
       "redis://h?path=/tmp/redis.sock",
       "127.0.0.1:6379?path=/tmp/redis.sock",
-    ]) {
+      "redis://h?path=/tmp/a.sock&path=/tmp/b.sock",
+    ];
+    for (const dsn of pinned) {
+      const client = new Redis(dsn, { lazyConnect: true });
+      try {
+        const path = client.options.path;
+        assert.ok(path, `${JSON.stringify(dsn)} must be a unix socket to ioredis`);
+        assert.deepEqual(netGrant(dsn), { flag: `--allow-net=${path}`, open: null, socket: path }, JSON.stringify(dsn));
+      } finally {
+        client.disconnect();
+      }
+    }
+    const refused: [string, RegExp][] = [
+      // No grant entry can match a relative path, and none is attempted.
+      ["redis://h?path=redis.sock", /relative unix socket path/],
+      // A bare "/" is a socket path to ioredis too; an fs grant on it would be
+      // the whole filesystem.
+      ["/", /directory/],
+      ["/?port=1", /directory/],
+      ["/var/run/", /directory/],
+      // oam splits a grant on commas and trims each entry.
+      ["/tmp/a,b.sock", /cannot express/],
+      ["redis://h?path=/tmp/x.sock%20", /cannot express/],
+    ];
+    for (const [dsn, reason] of refused) {
       const client = new Redis(dsn, { lazyConnect: true });
       try {
         assert.ok(client.options.path, `${JSON.stringify(dsn)} must be a unix socket to ioredis`);
-        assert.match(netGrant(dsn).open ?? "", /unix socket path/, JSON.stringify(dsn));
+        const grant = netGrant(dsn);
+        assert.equal(grant.flag, "--allow-net", JSON.stringify(dsn));
+        assert.equal(grant.refused, true, JSON.stringify(dsn));
+        assert.equal(grant.socket, undefined, JSON.stringify(dsn));
+        assert.match(grant.open ?? "", reason, JSON.stringify(dsn));
+        assert.doesNotMatch(grant.open ?? "", /redis\.sock|a,b|x\.sock|var/, "the reason must not echo the URL");
       } finally {
         client.disconnect();
       }
@@ -357,6 +402,72 @@ describe("launcher netGrant()", () => {
         client.disconnect();
       }
     }
+  });
+});
+
+describe("launcher remedyFor()", () => {
+  // Ported from ssh-mcp: one remedy per cause actually seen. An oam that is
+  // only too old needs `oam self-update`, never the website; one that would
+  // not run needs checking; installing is the remedy only when nothing was
+  // found -- and not on linux-arm64, which oam publishes no build for.
+  const remedyFor = new Function(
+    `${extract([OAM_MIN_DECL, /function remedyFor\(\{[^)]*\}\) \{[\s\S]*?\n\}/])}\nreturn remedyFor;`,
+  )() as RemedyFor;
+  const base = { passedOver: [], overrideMissing: false, shim: null, platform: "win32", arch: "x64" };
+
+  it("names `oam self-update` for an outdated oam, not the website", () => {
+    const out = remedyFor({ ...base, passedOver: [[0, 17, 1]] });
+    assert.match(out, /^Run `oam self-update` to get oam 0\.18\.0 or newer\.$/m);
+    assert.doesNotMatch(out, /oamjs\.org/);
+  });
+
+  it("asks to check a binary that would not run, and does not offer self-update for it", () => {
+    const out = remedyFor({ ...base, passedOver: [null] });
+    assert.match(out, /executable oam binary/);
+    assert.doesNotMatch(out, /self-update|oamjs\.org/);
+  });
+
+  it("asks to fix a missing OAM_BIN", () => {
+    assert.match(remedyFor({ ...base, overrideMissing: true }), /Point OAM_BIN at an existing oam binary/);
+  });
+
+  it("offers the install only when no oam was found, and not on linux-arm64", () => {
+    assert.match(remedyFor(base), /Install oam from https:\/\/oamjs\.org/);
+    assert.match(remedyFor({ ...base, platform: "linux", arch: "arm64" }), /no build for linux-arm64/);
+    assert.doesNotMatch(remedyFor({ ...base, platform: "linux", arch: "arm64" }), /oamjs\.org/);
+    assert.doesNotMatch(remedyFor({ ...base, shim: "C:\\x\\oam.cmd" }), /Install oam/);
+  });
+
+  it("always ends with the Node escape hatch", () => {
+    for (const ctx of [base, { ...base, passedOver: [[0, 17, 1], null] }]) {
+      assert.match(remedyFor(ctx), /Or use REDIS_MCP_RUNTIME=node to run on Node\.\n$/);
+    }
+  });
+});
+
+describe("launcher childEnv()", () => {
+  const childEnv = new Function(
+    `${extract([/function childEnv\(env = process\.env, hostOam = process\.versions\.oam\) \{[\s\S]*?\n\}/])}\nreturn childEnv;`,
+  )() as ChildEnv;
+
+  it("takes oam's inherited permission flags out of NODE_OPTIONS on an oam host", () => {
+    // oam 0.18.0 appends --permission/--allow-* to every child's NODE_OPTIONS.
+    // The sandbox this launcher applies rides on the spawned oam's argv, so an
+    // inherited one would be a sandbox nobody configured for this server.
+    const env = {
+      PATH: "/bin",
+      NODE_OPTIONS:
+        "--max-old-space-size=512 --permission --allow-net=h:1 --allow-fs-read=/x --experimental-permission",
+    };
+    assert.deepEqual(childEnv(env, "0.18.0"), { PATH: "/bin", NODE_OPTIONS: "--max-old-space-size=512" });
+    assert.deepEqual(childEnv({ PATH: "/bin", NODE_OPTIONS: "--permission --allow-env=A" }, "0.18.0"), {
+      PATH: "/bin",
+    });
+  });
+
+  it("passes NODE_OPTIONS untouched on a Node host, where it is the operator's own", () => {
+    const env = { NODE_OPTIONS: "--permission --allow-net=h:1" };
+    assert.equal(childEnv(env, undefined), env);
   });
 });
 
@@ -577,6 +688,37 @@ describe("launcher sandbox grant, as passed to the spawned oam", () => {
     assert.doesNotMatch(run.stderr, /hunter2/, "REDIS_URL can carry a password; it must never reach stderr");
   });
 
+  it("pins an absolute unix socket path, with fs read and write on that path alone", { skip, timeout }, async () => {
+    const run = await runLauncher(undefined, { REDIS_MCP_SANDBOX: "1", REDIS_URL: "/tmp/redis-mcp-test.sock?db=2" });
+    assert.equal(passedGrant(run.stderr), "--allow-net=/tmp/redis-mcp-test.sock", JSON.stringify(run));
+    const argv = spawnedArgv(run.stderr);
+    const prefix = argv.slice(0, argv.indexOf("run"));
+    assert.deepEqual(
+      prefix.filter((arg) => arg.startsWith("--allow-fs")),
+      ["--allow-fs-read=/tmp/redis-mcp-test.sock", "--allow-fs-write=/tmp/redis-mcp-test.sock"],
+      JSON.stringify(argv),
+    );
+    assert.doesNotMatch(run.stderr, /^redis-mcp: /m, "a pinned grant needs no note");
+  });
+
+  it("says the sandbox will refuse a relative socket path, rather than that the network is open", {
+    skip,
+    timeout,
+  }, async () => {
+    const run = await runLauncher(undefined, {
+      REDIS_MCP_SANDBOX: "1",
+      REDIS_URL: "redis://:hunter2@h?path=redis.sock",
+    });
+    assert.equal(passedGrant(run.stderr), "--allow-net", JSON.stringify(run));
+    assert.match(
+      run.stderr,
+      /^redis-mcp: REDIS_MCP_SANDBOX=1, but REDIS_URL names a relative unix socket path, which no sandbox grant can name, so the sandbox will refuse the connection; use an absolute socket path, or a host and port\.\r?$/m,
+    );
+    assert.doesNotMatch(run.stderr, /leaves network access open/);
+    assert.doesNotMatch(run.stderr, /hunter2/, "REDIS_URL can carry a password; it must never reach stderr");
+    assert.doesNotMatch(spawnedArgv(run.stderr).join(" "), /--allow-fs/);
+  });
+
   it("stays quiet about an open grant when REDIS_URL is unset or blank, which the server reports itself", {
     skip,
     timeout,
@@ -626,7 +768,7 @@ describe("launcher with no usable oam", () => {
     assert.equal(notes.length, 1, JSON.stringify(notes));
     assert.match(
       notes[0] ?? "",
-      /^redis-mcp: this process is oam 0\.9\.0, older than 0\.18\.0, and no newer oam was found \(OAM_BIN=.* does not exist\); running on .*node.* instead; update oam from https:\/\/oamjs\.org to use it \(0\.18\.0 or newer\)\.$/,
+      /^redis-mcp: this process is oam 0\.9\.0, older than 0\.18\.0, and no newer oam was found \(OAM_BIN=.* does not exist\); running on .*node.* instead; run `oam self-update` to get oam 0\.18\.0 or newer\.$/,
     );
     // Served by the child, not in the launcher process: argv[1] was never
     // pointed at dist/index.js.
@@ -715,6 +857,35 @@ describe("launcher with no usable oam", () => {
     assert.equal(run.code, 1, JSON.stringify(run));
     assert.equal(run.stdout.trim(), "", "nothing may be served unsandboxed");
     assert.match(run.stderr, /REDIS_MCP_RUNTIME=oam but no usable oam \(0\.18\.0 or newer\) was found/);
+    // The remedy fits the cause: OAM_BIN names a path that does not exist.
+    assert.match(run.stderr, /^Point OAM_BIN at an existing oam binary, or unset it\.\r?$/m);
+    assert.match(run.stderr, /^Or use REDIS_MCP_RUNTIME=node to run on Node\.\r?$/m);
+    assert.doesNotMatch(run.stderr, /Install or update from/);
+  });
+
+  it("searches OAM_INSTALL_DIR, where oam's installer and self-update put the binary", { skip, timeout }, async () => {
+    // A binary in OAM_INSTALL_DIR, not on PATH and in no default location. A
+    // preload answers its --version probe as an outdated oam, so the note
+    // naming it proves discovery looked there, and the remedy is self-update.
+    const dir = mkdtempSync(join(tmpdir(), "redis-mcp-oam-install-"));
+    const bin = join(dir, process.platform === "win32" ? "oam.exe" : "oam");
+    writeFileSync(bin, "");
+    const oldOam = [
+      'import installDirCp from "node:child_process";',
+      'import { syncBuiltinESMExports as installDirSync } from "node:module";',
+      "const installDirReal = installDirCp.execFileSync;",
+      "installDirCp.execFileSync = function (file, args, opts) {",
+      '  if (Array.isArray(args) && args[0] === "--version") return "oam 0.17.1\\n";',
+      "  return installDirReal.call(this, file, args, opts);",
+      "};",
+      "installDirSync();",
+    ].join("\n");
+    const run = await runLauncher(undefined, isolated({ OAM_BIN: "", OAM_INSTALL_DIR: dir }), oldOam);
+    assert.equal(run.code, 0, JSON.stringify(run));
+    const notes = launcherNotes(run.stderr);
+    assert.equal(notes.length, 1, JSON.stringify(notes));
+    assert.ok(notes[0]?.includes(`${bin} is oam 0.17.1, older than 0.18.0`), JSON.stringify(notes));
+    assert.match(notes[0] ?? "", /; run `oam self-update` to get oam 0\.18\.0 or newer\.$/);
   });
 
   /**
@@ -810,7 +981,7 @@ describe("launcher with no usable oam", () => {
     assert.equal(notes.length, 1, JSON.stringify(notes));
     assert.match(
       notes[0] ?? "",
-      /^redis-mcp: this process is oam 0\.17\.0, older than 0\.18\.0, and no newer oam was found \(OAM_BIN=.* does not exist\); running on .*node.* instead, without --permission; update oam from https:\/\/oamjs\.org to use it \(0\.18\.0 or newer\)\.$/,
+      /^redis-mcp: this process is oam 0\.17\.0, older than 0\.18\.0, and no newer oam was found \(OAM_BIN=.* does not exist\); running on .*node.* instead, without --permission; run `oam self-update` to get oam 0\.18\.0 or newer\.$/,
     );
   });
 
@@ -832,7 +1003,7 @@ describe("launcher with no usable oam", () => {
     assert.deepEqual(
       launcherNotes(run.stderr).map((note) => note.replace(/OAM_BIN=.* is oam/, "OAM_BIN=<oam> is oam")),
       [
-        "redis-mcp: OAM_BIN=<oam> is oam 0.17.0, older than 0.18.0; using Node instead; update oam from https://oamjs.org to use it (0.18.0 or newer).",
+        "redis-mcp: OAM_BIN=<oam> is oam 0.17.0, older than 0.18.0; using Node instead; run `oam self-update` to get oam 0.18.0 or newer.",
       ],
     );
   });

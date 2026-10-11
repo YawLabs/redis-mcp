@@ -55,12 +55,15 @@
     "test:integration": "npm run build && node scripts/run-tests.mjs dist --integration",
     "lint": "node scripts/lint.mjs check src/",
     "lint:fix": "node scripts/lint.mjs check --write src/",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "check:oam-floor": "node scripts/check-oam-floor.mjs",
+    "check:compliance": "node scripts/check-compliance.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.12",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@types/node": "^25.6.0",
+    "@yawlabs/mcp-compliance": "^0.20.4",
     "esbuild": "^0.28.0",
     "ioredis": "^5.11.0",
     "postject": "^1.0.0-alpha.6",
