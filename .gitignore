@@ -18,7 +18,7 @@ Thumbs.db
 # Logs
 *.log
 
-# Single-binary build artifacts (SEA)
+# Single-binary build artifacts
 bin/*
 !bin/redis-mcp.mjs
 build-tmp/

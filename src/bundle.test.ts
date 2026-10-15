@@ -61,8 +61,7 @@ describe("built bundle", () => {
   // oam cannot `import()` a module with top-level await. The launcher serves
   // in-process by importing dist/index.js, so one such await made every
   // in-process fallback on an oam host print "fallback to Node failed" and set
-  // exit code 1, even though the server went on to serve. The CJS
-  // single-binary build (scripts/build-binary.mjs) cannot emit one either.
+  // exit code 1, even though the server went on to serve.
   it("dist/index.js has no top-level await", () => {
     assert.ok(existsSync(BUNDLE), `${BUNDLE} is not built -- run \`npm test\`, which builds first`);
     const found = topLevelAwaits(readFileSync(BUNDLE, "utf-8"));

@@ -79,8 +79,8 @@ try {
 }
 
 const transport = new StdioServerTransport();
-// No top-level await: the CJS single-binary build (esbuild SEA) cannot emit
-// top-level await. .catch keeps the connect's failure handling behavior.
+// No top-level await: oam cannot `import()` a module that has one (see the
+// __VERSION__ note above). .catch keeps the connect's failure handling behavior.
 server.connect(transport).catch((err: unknown) => {
   process.stderr.write(`redis-mcp: ${err instanceof Error ? err.message : String(err)}\n`);
   process.exit(1);
