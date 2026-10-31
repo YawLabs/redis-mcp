@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.6] — 2026-10-30
+
 ### Changed
 - **The oam floor moves from 0.18.0 to 0.19.1, so the `redis-mcp` launcher no longer runs the server on an older oam**, 0.19.0 included. This server is verified on one oam release at a time, and 0.19.1 is the latest. It is verified on the installed aarch64-pc-windows-msvc `oam 0.19.1` through the launcher with `REDIS_MCP_RUNTIME=oam` and `OAM_BIN` pointing at it, against the local RESP stub: a full MCP handshake listing all 7 tools, `redis_command PING` answering `PONG` and `redis_health` answering, with the startup banner reading `on oam 0.19.1`; the same run under `REDIS_MCP_SANDBOX=1` answers the same. The suite's `rediss://` cases under a real oam ran on it too. 0.19.1 is also the oam where a repeated `--allow-net` adds its grant instead of replacing the earlier one; the launcher passes exactly one, and its test now says why a second would widen the grant either way. **If the launcher finds only an oam older than 0.19.1, it falls back to Node under the default `REDIS_MCP_RUNTIME=auto`, and exits with an error under `REDIS_MCP_RUNTIME=oam`**, naming the version it found and the floor. Run `oam self-update`, or set `REDIS_MCP_RUNTIME=node` to make the choice explicit.
 - **`REDIS_MCP_SANDBOX` accepts `1` or `true` in any case, with surrounding whitespace trimmed**, and any other non-empty value prints one stderr warning that the server runs without `--permission`. It used to take only an exact `1`, so `true`, or the `1 ` that cmd.exe's `set REDIS_MCP_SANDBOX=1 && ...` leaves, ran the server unsandboxed without a word.
