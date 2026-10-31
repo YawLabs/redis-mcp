@@ -121,7 +121,7 @@
  * The env list is derived from the shipped bundle.
  *
  * MINIMUM OAM VERSION
- * The latest oam release, 0.18.0 -- bump OAM_MIN when oam ships a newer one.
+ * The latest oam release, 0.19.1 -- bump OAM_MIN when oam ships a newer one.
  * Only the current oam is used and verified; an older one is passed over.
  * Every remedy for an oam that works but is too old names `oam self-update`,
  * oam's native, signature-verified update path since 0.18.0. A binary older
@@ -156,7 +156,8 @@
  *                            except under REDIS_MCP_SANDBOX=1)
  *   REDIS_MCP_RUNTIME=node   Node: in THIS process on Node, handed off to Node
  *                            on PATH when THIS process is oam
- *   REDIS_MCP_SANDBOX=1      run a spawned oam under --permission;
+ *   REDIS_MCP_SANDBOX=1      run a spawned oam under --permission (1 or true,
+ *                            any case, trimmed; other values warn and are off);
  *                            NOT applied when auto falls back
  *   OAM_BIN=/path/to/oam     use this oam when it is usable, before discovery
  * The runtime value is case-insensitive; anything else behaves like `auto`.
@@ -169,7 +170,7 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Oldest oam this server is used and verified on. See MINIMUM OAM VERSION above. */
-const OAM_MIN = [0, 18, 0];
+const OAM_MIN = [0, 19, 1];
 
 /**
  * Bound on each `oam --version` probe. A healthy oam answers in milliseconds;
@@ -485,6 +486,17 @@ function isDirectory(path) {
 }
 
 /**
+ * Is REDIS_MCP_SANDBOX an opt-in? `1` or `true`, any case, surrounding
+ * whitespace ignored -- cmd.exe's `set REDIS_MCP_SANDBOX=1 && ...` leaves a
+ * trailing space, which used to run the server unsandboxed in silence. Any
+ * other non-empty value is still OFF; the launcher says so once on stderr
+ * (see the top-level check below).
+ */
+function sandboxRequested(raw) {
+  return /^(1|true)$/i.test((raw ?? "").trim());
+}
+
+/**
  * The `--permission` grant list, or [] when the sandbox is not requested.
  *
  * These are oam's PROCESS-level flags: they belong before the `run` subcommand,
@@ -497,7 +509,7 @@ function isDirectory(path) {
  * it produces silent misbehaviour, not a clear denial.
  */
 function sandboxFlags() {
-  if (process.env.REDIS_MCP_SANDBOX !== "1") return [];
+  if (!sandboxRequested(process.env.REDIS_MCP_SANDBOX)) return [];
 
   const grant = netGrant(process.env.REDIS_URL);
 
@@ -892,7 +904,7 @@ function withAction(note, hostOam) {
  * note. `oam self-update` is the native, signature-verified update path since
  * oam 0.18.0, and the one the no-Node handoff message names too; the website
  * is for a box with no oam at all (see remedyFor). See MINIMUM OAM VERSION for
- * what self-update needs when it starts from an oam older than 0.18.0.
+ * what self-update needs when it starts from an oam that predates 0.18.0.
  */
 const UPDATE_OAM = `run \`oam self-update\` to get oam ${OAM_MIN.join(".")} or newer`;
 
@@ -940,6 +952,15 @@ async function fallBack(hostOam, why = "no newer oam was found") {
 
 const mode = (process.env.REDIS_MCP_RUNTIME ?? "auto").toLowerCase();
 const hostOam = process.versions.oam;
+
+// A security opt-in that was set but not understood must not pass in silence:
+// the sandbox stays off, and the operator hears about it.
+const sandboxRaw = (process.env.REDIS_MCP_SANDBOX ?? "").trim();
+if (sandboxRaw && !sandboxRequested(sandboxRaw)) {
+  await errSync(
+    `redis-mcp: REDIS_MCP_SANDBOX=${JSON.stringify(process.env.REDIS_MCP_SANDBOX)} is not 1 or true; running without --permission.\n`,
+  );
+}
 
 // The sandbox is read off the grant list rather than REDIS_MCP_SANDBOX, so
 // "would the spawn carry --permission" cannot drift from what the spawn below

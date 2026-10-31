@@ -150,8 +150,13 @@ export function getMaxValueBytes(): number {
   return Math.min(64_000_000, Math.floor(parsed));
 }
 
+/**
+ * ALLOW_WRITES, strict: exactly `1` or `true`. Surrounding whitespace is
+ * trimmed (cmd.exe's `set ALLOW_WRITES=1 && ...` leaves a trailing space);
+ * the case is not folded, so anything else keeps the server read-only.
+ */
 export function isWritesAllowed(): boolean {
-  const v = process.env.ALLOW_WRITES;
+  const v = process.env.ALLOW_WRITES?.trim();
   return v === "1" || v === "true";
 }
 

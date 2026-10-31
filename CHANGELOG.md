@@ -2,14 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+- **The oam floor moves from 0.18.0 to 0.19.1, so the `redis-mcp` launcher no longer runs the server on an older oam**, 0.19.0 included. This server is verified on one oam release at a time, and 0.19.1 is the latest. It is verified on the installed aarch64-pc-windows-msvc `oam 0.19.1` through the launcher with `REDIS_MCP_RUNTIME=oam` and `OAM_BIN` pointing at it, against the local RESP stub: a full MCP handshake listing all 7 tools, `redis_command PING` answering `PONG` and `redis_health` answering, with the startup banner reading `on oam 0.19.1`; the same run under `REDIS_MCP_SANDBOX=1` answers the same. The suite's `rediss://` cases under a real oam ran on it too. 0.19.1 is also the oam where a repeated `--allow-net` adds its grant instead of replacing the earlier one; the launcher passes exactly one, and its test now says why a second would widen the grant either way. **If the launcher finds only an oam older than 0.19.1, it falls back to Node under the default `REDIS_MCP_RUNTIME=auto`, and exits with an error under `REDIS_MCP_RUNTIME=oam`**, naming the version it found and the floor. Run `oam self-update`, or set `REDIS_MCP_RUNTIME=node` to make the choice explicit.
+- **`REDIS_MCP_SANDBOX` accepts `1` or `true` in any case, with surrounding whitespace trimmed**, and any other non-empty value prints one stderr warning that the server runs without `--permission`. It used to take only an exact `1`, so `true`, or the `1 ` that cmd.exe's `set REDIS_MCP_SANDBOX=1 && ...` leaves, ran the server unsandboxed without a word.
+- `ALLOW_WRITES` is trimmed before it is read, so `1 ` enables writes as `1` does. It is otherwise unchanged: exactly `1` or `true`, and anything else keeps the server read-only.
+
+### Fixed
+- `scripts/check-oam-floor.mjs` runs when it is invoked through a junctioned or symlinked path. It decided it was the main module by comparing `resolve(process.argv[1])` with its own URL, which Node realpaths while leaving `argv[1]` as typed, so from a linked checkout the check never ran and exited 0 in silence. Both sides are now realpath'd, and a test runs it through a junction. Release tooling only.
+- The CHANGELOG's [0.5.5] section no longer carries the merge-conflict markers it was committed with; the [0.5.4] maintenance entry keeps its own heading below it.
+
 ## [0.5.5] — 2026-10-11
 
-<<<<<<< HEAD
-## [0.5.4] — 2026-10-11
-
-### Changed
-- Maintenance release; no changes since v0.5.3.
-=======
 ### Added
 - **The server now sends MCP `instructions`: a short, plain-ASCII routing note** (read-only unless `ALLOW_WRITES=1`, start with `redis_health`, enumerate with `redis_scan` and its cursor rather than `KEYS`, `redis_key_info` before `redis_get` on a key of unknown size, `redis_advisor` for "what should I worry about"). Yaw MCP shows an upstream's instructions once per session in its activate/dispatch reply; until now that block was empty. A test holds it under yaw-mcp's 2000-byte ceiling, to ASCII, and to the real tool list.
 - **The README tells a Yaw MCP user how to set `REDIS_URL`**: `yaw-mcp set redis env.REDIS_URL --secret` stores it in the vault in one step, and a changed value takes effect after `mcp_connect_deactivate redis`. Yaw MCP does not prompt for it, because `REDIS_URL` is not a credential-shaped name.
@@ -25,7 +28,11 @@
 
 ### Fixed
 - `scripts/update-manifests.mjs` escapes every value it writes into a Ruby string in the Homebrew formula (CodeQL js/incomplete-sanitization). The `desc` line escaped `"` but not `\`, so a description holding `\"` came out as `\\"`, an escaped backslash and then a closing quote, and it left `#{...}` alone, which Ruby runs as code when brew loads the formula. A new `rubyString()` escapes the backslash first, then `"`, a `#` that starts interpolation (`#{`, `#@`, `#$`; a plain `#` is left as written), CR and LF, and is applied to the description, homepage, version, license, URLs, hashes and command name; a command that does not make a valid Ruby class name is refused. For the current package.json the generated formula and Scoop manifest are byte-identical to before. Release tooling only; the server itself is unchanged.
->>>>>>> a6a5af616900bcb5e8751001f38ccb980db9c6da
+
+## [0.5.4] — 2026-10-11
+
+### Changed
+- Maintenance release; no changes since v0.5.3.
 
 ## [0.5.3] — 2026-10-06
 

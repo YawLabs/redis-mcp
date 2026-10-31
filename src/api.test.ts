@@ -43,6 +43,13 @@ describe("isWritesAllowed", () => {
     assert.equal(isWritesAllowed(), true);
   });
 
+  it("trims surrounding whitespace, as cmd.exe's `set ALLOW_WRITES=1 && ...` leaves it", () => {
+    for (const v of ["1 ", " 1", "true ", "\ttrue"]) {
+      process.env.ALLOW_WRITES = v;
+      assert.equal(isWritesAllowed(), true, `ALLOW_WRITES=${JSON.stringify(v)} should be true`);
+    }
+  });
+
   it("is false for other truthy-looking strings (strict opt-in)", () => {
     for (const v of ["yes", "y", "on", "TRUE", "True", "0", "false", ""]) {
       process.env.ALLOW_WRITES = v;

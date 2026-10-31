@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
@@ -51,6 +51,32 @@ describe("the oam floor is consistent across this repo", () => {
     const r = runChecker(repoRoot);
     assert.equal(r.code, 0, `check-oam-floor reported drift in this repo:\n${r.out}`);
     assert.match(r.out, /no drift/);
+  });
+
+  it("still runs when invoked through a junctioned or symlinked path", () => {
+    // Node realpaths the main module's URL but not argv[1], so a plain resolve()
+    // compare skipped main() from a linked checkout and exited 0 in silence.
+    // A junction needs no privilege on Windows; elsewhere it is a dir symlink.
+    // The link is unlinked by hand, and its parent only queued for the recursive
+    // cleanup once it is gone, so that cleanup can never walk into the real
+    // scripts/ through it.
+    const linkParent = mkdtempSync(join(tmpdir(), "redis-mcp-floor-link-"));
+    const link = join(linkParent, "scripts");
+    symlinkSync(join(repoRoot, "scripts"), link, "junction");
+    const root = fixture({ readme: "Path to an `oam` binary, when it is 0.16.2 or newer.\n" });
+    let r: ReturnType<typeof spawnSync>;
+    try {
+      r = spawnSync(process.execPath, [join(link, "check-oam-floor.mjs"), "--offline", "--root", root], {
+        encoding: "utf8",
+        timeout: 60_000,
+      });
+    } finally {
+      unlinkSync(link);
+      dirs.push(linkParent);
+    }
+    const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    assert.match(out, /oam floor \(OAM_MIN/, `the checker printed nothing through the link:\n${out}`);
+    assert.equal(r.status, 1, out);
   });
 });
 
