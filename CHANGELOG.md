@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.7] — 2026-11-11
+
 ### Changed
 - **The oam floor moves from 0.19.1 to 0.19.5, so the `redis-mcp` launcher no longer runs the server on an older oam**, 0.19.4 included. 0.19.5 is the latest oam release, and the one this server is now verified on. It was verified on the installed aarch64-pc-windows-msvc `oam 0.19.5` through the launcher with `REDIS_MCP_RUNTIME=oam` and `OAM_BIN` pointing at it, against the local RESP stub: a full MCP handshake listing all 7 tools, `redis_command PING` answering `PONG` and `redis_health` answering, with the startup banner reading `on oam 0.19.5`. The same run under `REDIS_MCP_SANDBOX=1` gives the same answers. The suite's `rediss://` cases also ran under the real oam 0.19.5: the sandbox, an IPv6 literal, a private CA named by `NODE_EXTRA_CA_CERTS`, reconnecting after a drop and a stalled handshake. **If the launcher finds only an oam older than 0.19.5, it falls back to Node under the default `REDIS_MCP_RUNTIME=auto`, and exits with an error under `REDIS_MCP_RUNTIME=oam`.** Run `oam self-update`, or set `REDIS_MCP_RUNTIME=node` to make the choice explicit.
 
