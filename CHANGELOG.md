@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Security
+- **The bundled zod moves to 4.6.7**, which fixes GHSA-mrhx-c7xc-m3w5: validating an oversized constrained collection could exhaust memory. zod is bundled into `dist/index.js`, so this is the one change in this release that reaches the shipped server.
+- Development-only dependencies are bumped past their advisories: undici 8.12.4, fast-uri 3.1.9, hono 4.13.18, @hono/node-server 2.1.7, plus body-parser, qs and ip-address. None of them ships in the package.
+
 ## [0.5.6] — 2026-10-30
 
 ### Changed
