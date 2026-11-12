@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **The oam floor moves from 0.19.1 to 0.19.5, so the `redis-mcp` launcher no longer runs the server on an older oam**, 0.19.4 included. 0.19.5 is the latest oam release, and the one this server is now verified on. It was verified on the installed aarch64-pc-windows-msvc `oam 0.19.5` through the launcher with `REDIS_MCP_RUNTIME=oam` and `OAM_BIN` pointing at it, against the local RESP stub: a full MCP handshake listing all 7 tools, `redis_command PING` answering `PONG` and `redis_health` answering, with the startup banner reading `on oam 0.19.5`. The same run under `REDIS_MCP_SANDBOX=1` gives the same answers. The suite's `rediss://` cases also ran under the real oam 0.19.5: the sandbox, an IPv6 literal, a private CA named by `NODE_EXTRA_CA_CERTS`, reconnecting after a drop and a stalled handshake. **If the launcher finds only an oam older than 0.19.5, it falls back to Node under the default `REDIS_MCP_RUNTIME=auto`, and exits with an error under `REDIS_MCP_RUNTIME=oam`.** Run `oam self-update`, or set `REDIS_MCP_RUNTIME=node` to make the choice explicit.
+
 ### Security
 - **The bundled zod moves to 4.6.7**, which fixes GHSA-mrhx-c7xc-m3w5: validating an oversized constrained collection could exhaust memory. zod is bundled into `dist/index.js`, so this is the one change in this release that reaches the shipped server.
 - Development-only dependencies are bumped past their advisories: undici 8.12.4, fast-uri 3.1.9, hono 4.13.18, @hono/node-server 2.1.7, plus body-parser, qs and ip-address. None of them ships in the package.

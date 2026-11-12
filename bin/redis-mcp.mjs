@@ -121,7 +121,7 @@
  * The env list is derived from the shipped bundle.
  *
  * MINIMUM OAM VERSION
- * The latest oam release, 0.19.1 -- bump OAM_MIN when oam ships a newer one.
+ * The latest oam release, 0.19.5 -- bump OAM_MIN when oam ships a newer one.
  * Only the current oam is used and verified; an older one is passed over.
  * Every remedy for an oam that works but is too old names `oam self-update`,
  * oam's native, signature-verified update path since 0.18.0. A binary older
@@ -170,7 +170,7 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Oldest oam this server is used and verified on. See MINIMUM OAM VERSION above. */
-const OAM_MIN = [0, 19, 1];
+const OAM_MIN = [0, 19, 5];
 
 /**
  * Bound on each `oam --version` probe. A healthy oam answers in milliseconds;
