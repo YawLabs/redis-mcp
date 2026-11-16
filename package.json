@@ -57,6 +57,7 @@
     "lint:fix": "node scripts/lint.mjs check --write src/",
     "prepublishOnly": "npm run build",
     "check:oam-floor": "node scripts/check-oam-floor.mjs",
+    "check:yaw-mcp-floor": "node scripts/check-yaw-mcp-floor.mjs",
     "check:compliance": "node scripts/check-compliance.mjs"
   },
   "devDependencies": {

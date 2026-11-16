@@ -2,7 +2,7 @@
 
 [![Add to Yaw MCP](https://yaw.sh/yaw-mcp-button.svg)](https://yaw.sh/mcp/install?name=Redis&command=npx&args=-y%2C%40yawlabs%2Fredis-mcp&description=Explore%20and%20diagnose%20Redis%20-%20SCAN%20key%20exploration%2C%20health%2C%20DBA%20advisor&source=https%3A%2F%2Fgithub.com%2FYawLabs%2Fredis-mcp)
 
-One click adds this to your local Yaw MCP config so it's available in every Yaw Terminal session. Or install manually below.
+One click adds this to your local Yaw MCP config so it's available in every Yaw Terminal session. Tested with Yaw MCP 1.1.13 or newer. Or install manually below.
 
 **Then give it your `REDIS_URL`.** The button deliberately carries no connection string, and Yaw MCP will not prompt for one: it asks only for variables whose names look like credentials, and `REDIS_URL` does not. Until it is set, the server exits at startup with `REDIS_URL is not set`. Store it in Yaw MCP's encrypted vault in one step:
 
