@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.8] — 2026-11-15
+
 ### Changed
 - **The oam floor moves from 0.19.5 to 0.20.2, so the `redis-mcp` launcher no longer runs the server on an older oam**, 0.19.5, 0.20.0 and 0.20.1 included. 0.20.2 is the latest oam release, the one Yaw MCP 1.1.13 requires, and the one this server is now verified on. It was verified on the installed aarch64-pc-windows-msvc `oam 0.20.2` through the launcher with `REDIS_MCP_RUNTIME=oam` and `OAM_BIN` pointing at it, against the local RESP stub: a full MCP handshake listing all 7 tools, `redis_command PING` answering `PONG` and `redis_health` answering, with the startup banner reading `on oam 0.20.2`. The same run under `REDIS_MCP_SANDBOX=1` gives the same answers. The suite's `rediss://` cases also ran under the real oam 0.20.2: `oam run` on the launcher, discovery, the sandbox, an IPv6 literal, a private CA named by `NODE_EXTRA_CA_CERTS`, reconnecting after a drop and a stalled handshake. `@yawlabs/mcp-compliance` 0.20.4 grades the launcher A on Node and on oam 0.20.2. **If the launcher finds only an oam older than 0.20.2, it falls back to Node under the default `REDIS_MCP_RUNTIME=auto`, and exits with an error under `REDIS_MCP_RUNTIME=oam`.** Run `oam self-update`, or set `REDIS_MCP_RUNTIME=node` to make the choice explicit.
 - The development-only `@modelcontextprotocol/sdk` range moves to `^1.32.2`, the range Yaw MCP 1.1.13 pins. It does not ship in the package.
